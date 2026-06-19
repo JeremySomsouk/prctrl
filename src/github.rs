@@ -91,6 +91,7 @@ pub async fn fetch_pending_reviews(
     include_drafts: bool,
     exclude_prefixes: &[String],
     crew_members: &[String],
+    max_age_days: Option<u32>,
 ) -> Result<Vec<PendingReview>> {
     // Collect candidate PRs across all repos with pagination
     #[derive(Clone)]
@@ -168,6 +169,22 @@ pub async fn fetch_pending_reviews(
             }
 
             let author = pr.user.as_ref().map(|u| u.login.as_str()).unwrap_or("");
+
+            // Filter by max age if configured
+            if let Some(max_age) = max_age_days {
+                let pr_created = match pr.created_at {
+                    Some(created) => created,
+                    None => {
+                        // If PR has no creation date, conservatively filter it out
+                        // when age filtering is enabled
+                        continue;
+                    }
+                };
+                let duration = chrono::Utc::now() - pr_created;
+                if duration.num_days() > max_age as i64 {
+                    continue;
+                }
+            }
 
             // --crew mode: only show PRs authored by crew members
             if !crew_members.is_empty() {
@@ -289,6 +306,7 @@ pub async fn fetch_my_open_prs(
     username: &str,
     include_drafts: bool,
     exclude_prefixes: &[String],
+    max_age_days: Option<u32>,
 ) -> Result<Vec<PendingReview>> {
     // Collect candidate PRs across all repos with full pagination
     #[derive(Clone)]
@@ -366,6 +384,23 @@ pub async fn fetch_my_open_prs(
             }
 
             let author = pr.user.as_ref().map(|u| u.login.as_str()).unwrap_or("");
+            
+            // Filter by max age if configured
+            if let Some(max_age) = max_age_days {
+                let pr_created = match pr.created_at {
+                    Some(created) => created,
+                    None => {
+                        // If PR has no creation date, conservatively filter it out
+                        // when age filtering is enabled
+                        continue;
+                    }
+                };
+                let duration = chrono::Utc::now() - pr_created;
+                if duration.num_days() > max_age as i64 {
+                    continue;
+                }
+            }
+            
             if author != username {
                 continue;
             }

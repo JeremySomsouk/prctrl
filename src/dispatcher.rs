@@ -355,6 +355,7 @@ pub async fn monitor_new_prs(
             include_drafts,
             exclude_prefixes,
             crew_members,
+            None, // max_age_days - not configured in dispatcher
         )
         .await?;
 

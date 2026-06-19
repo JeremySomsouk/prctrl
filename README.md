@@ -2,7 +2,7 @@
 
 > **Terminal-native GitHub PR management. Stay on top of code reviews without leaving your terminal.**
 
-PRCtrl helps engineering teams manage PR reviews efficiently. Monitor incoming PRs, get smart notifications, and integrate with AI for instant triage — all from the command line.
+PRCtrl helps engineering teams manage PR reviews efficiently. Monitor incoming PRs, get smart notifications, integrate with AI for instant triage, and now with a **rich Terminal UI mode** — all from the command line.
 
 [![crates.io](https://img.shields.io/crates/v/prctrl.svg)](https://crates.io/crates/prctrl)
 [![crates.io](https://img.shields.io/crates/d/prctrl.svg)](https://crates.io/crates/prctrl)
@@ -29,6 +29,8 @@ $ prctrl list
 - **Delegate** triage to Claude for instant recommendations
 - **Track** review history and team metrics
 - **Stack detection** automatically identifies PRs that build on each other
+- **Terminal UI mode** for interactive PR management with auto-refresh
+- **Smart caching** to reduce GitHub API calls
 
 ## Quick Start
 
@@ -41,6 +43,9 @@ prctrl config init
 
 # List pending reviews
 prctrl list
+
+# Launch Terminal UI mode
+prctrl tui
 
 # Monitor for new PRs (background)
 prctrl monitor
@@ -79,6 +84,9 @@ username = "john_doe"
 org = "my-company"
 repos = ["frontend", "backend", "mobile"]
 teams = ["platform", "backend"]  # optional
+crew_members = ["alice", "bob", "carol"]  # optional
+exclude_prefix = ["chore(deps)", "renovate"]  # optional: filter out dependency PRs
+max_pr_age_days = 60  # optional: only show PRs from the last 60 days
 ```
 
 **Getting a GitHub Token:**
@@ -87,6 +95,21 @@ teams = ["platform", "backend"]  # optional
 2. Generate New Token (Classic)
 3. Select scopes: `repo`, `read:user`, `notifications`
 4. Copy the token and add it to your config
+
+**Configuring PR Filtering**
+
+You can filter which PRs appear in your lists:
+
+```toml
+[github]
+# ... required fields above ...
+
+# Filter out dependency update PRs (default: ["chore(deps)"])
+exclude_prefix = ["chore(deps)", "renovate", "dependabot"]
+
+# Only show PRs created in the last N days (default: 60)
+max_pr_age_days = 30
+```
 
 **Optional: Configure Crew Members**
 
@@ -110,6 +133,8 @@ Instead of a config file, you can use environment variables:
 | `PRCTRL_GITHUB_REPOS` | Repos to monitor (comma-separated) |
 | `PRCTRL_GITHUB_TEAMS` | Teams to filter (optional) |
 | `PRCTRL_ANTHROPIC_API_KEY` | For Claude integration (optional) |
+| `PRCTRL_MAX_PR_AGE_DAYS` | Max PR age in days (default: 60) |
+| `MAX_PR_AGE_DAYS` | Alternative name for max PR age |
 
 ## CLI Reference
 
@@ -121,11 +146,78 @@ Instead of a config file, you can use environment variables:
 | `prctrl delegate [pr]` | AI triage with Claude |
 | `prctrl chat` | Interactive chat with Claude |
 | `prctrl monitor` | Background monitoring |
+| `prctrl tui` | **Terminal UI mode** (interactive) |
 | `prctrl approve <pr>` | Quick approve |
 | `prctrl chase <pr>` | Follow up stale PRs |
 | `prctrl stats` | Team review metrics |
 
 See `prctrl --help` for full command list.
+
+## Terminal UI Mode (TUI)
+
+Launch an interactive terminal interface for managing PRs:
+
+```bash
+# Start TUI with default 30-second refresh
+prctrl tui
+
+# Custom refresh interval
+prctrl tui -i 60  # Refresh every 60 seconds
+prctrl tui --interval 15  # Refresh every 15 seconds
+```
+
+### Features
+
+- **Left Sidebar**: Navigation tabs for different views
+- **Auto-Refresh**: Configurable refresh interval
+- **Smart Caching**: Preloads all tabs for instant switching
+- **Filter Mode**: Type `/` to search PRs by title, author, repo, or number
+- **Action Menu**: Press `Enter` on a PR to see available actions
+
+### Tabs
+
+| Tab | Description |
+|-----|-------------|
+| **Pending Reviews** | PRs where you're a requested reviewer |
+| **My PRs** | Your own open pull requests |
+| **Crew** | PRs from your crew members |
+| **Statistics** | Team review metrics |
+| **Monitor Live** | Always fresh data (bypasses cache) |
+
+### Keyboard Shortcuts
+
+| Key | Action |
+|-----|--------|
+| `↑` / `k` | Previous PR |
+| `↓` / `j` | Next PR |
+| `PageUp` | Previous page (10 PRs) |
+| `PageDown` | Next page (10 PRs) |
+| `Home` | First PR |
+| `End` | Last PR |
+| `Tab` | Next tab |
+| `Shift+Tab` | Previous tab |
+| `/` | Start filter mode |
+| `Ctrl+F` | Clear filter |
+| `Enter` | Show actions for selected PR |
+| `Ctrl+R` | Force refresh (bypass cache) |
+| `R` | Refresh (use cache) |
+| `?` | Toggle help overlay |
+| `Esc` | Close menu/clear filter/quit |
+| `q` | Quit |
+
+### Action Menu
+
+When you select a PR and press `Enter`, you can:
+
+| Action | Description |
+|--------|-------------|
+| **Open in Browser** | Open PR in your default browser |
+| **Claude Code Review** | Launch AI-powered code review |
+| **Copy URL** | Copy PR URL to clipboard |
+| **Show Diff** | View PR diff |
+| **Approve PR** | Approve the pull request |
+| **Request Changes** | Request changes on the PR |
+| **Cancel** | Close the menu |
 
 ## Workflow Example
 
@@ -139,9 +231,26 @@ prctrl approve 4821
 # Deep work: Delegate triage to AI
 prctrl delegate
 
+# Interactive: Use Terminal UI for full management
+prctrl tui
+
 # End of day: Check team stats
 prctrl team-summary
 ```
+
+## Smart Caching
+
+PRCtrl includes an intelligent caching system that:
+
+- **Reduces API Calls**: Caches PR data to minimize GitHub rate limit usage
+- **Auto-Expiration**: Cache entries expire after 60 seconds by default
+- **Smart Invalidation**: Monitor Live tab always fetches fresh data
+- **Tab Preloading**: All tabs are preloaded in the background for instant switching
+- **Efficient Storage**: Thread-safe cache with proper memory management
+
+### Cache Configuration
+
+The cache TTL can be configured programmatically. The default is 60 seconds for most operations.
 
 ## Integrations
 
@@ -164,7 +273,6 @@ prctrl chat --pr 4821
 ```
 
 The `chat` command launches an interactive Claude Code session with context about PRCtrl commands. Ask questions about PRs, get recommendations on what to review, or learn how to use PRCtrl features.
-
 
 ## Stack Detection
 

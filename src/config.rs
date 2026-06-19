@@ -11,6 +11,8 @@ pub struct Config {
     pub crew_members: Vec<String>,
     #[allow(dead_code)]
     pub anthropic_api_key: Option<String>,
+    pub exclude_prefix: Vec<String>,
+    pub max_pr_age_days: Option<u32>,
 }
 
 fn get_config_path() -> PathBuf {
@@ -166,6 +168,38 @@ impl Config {
             None
         };
 
+        // Load exclude_prefix from config or use default
+        let exclude_prefix = if let Some(ref t) = toml {
+            let from_config = get_toml_array(t, "exclude_prefix");
+            if from_config.is_empty() {
+                vec!["chore(deps)".to_string()]
+            } else {
+                from_config
+            }
+        } else {
+            // Default to filtering out dependency update PRs
+            vec!["chore(deps)".to_string()]
+        };
+
+        // Load max_pr_age_days from config or use default (60 days)
+        let max_pr_age_days = if let Some(ref t) = toml {
+            t.get("github")
+                .and_then(|s| s.as_table())
+                .and_then(|t| t.get("max_pr_age_days"))
+                .and_then(|v| v.as_integer())
+                .map(|d| d as u32)
+        } else {
+            None
+        }
+        .or_else(|| {
+            // Check environment variable
+            std::env::var("PRCTRL_MAX_PR_AGE_DAYS")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .or_else(|| std::env::var("MAX_PR_AGE_DAYS").ok().and_then(|s| s.parse().ok()))
+        })
+        .or(Some(60)); // Default to 60 days
+
         Ok(Self {
             github_token,
             github_username,
@@ -174,6 +208,8 @@ impl Config {
             github_teams,
             crew_members,
             anthropic_api_key,
+            exclude_prefix,
+            max_pr_age_days,
         })
     }
 }

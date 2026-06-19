@@ -40,18 +40,28 @@ impl CommandContext {
             vec![]
         };
 
-        let reviews = github::fetch_pending_reviews(
-            &cfg.github_token,
-            &cfg.github_org,
-            &cfg.github_repos,
-            &cfg.github_username,
-            &cfg.github_teams,
-            include_mine,
-            include_drafts,
-            &cli.exclude_prefix,
-            &crew_members,
-        )
-        .await?;
+        // Only pay for the (network-bound) pending-reviews prefetch when the
+        // command actually consumes `ctx.reviews`. Commands that fetch their own
+        // data (TUI, monitor, clean) or that target a specific PR by number would
+        // otherwise block on a wasted GitHub round-trip before their UI appears —
+        // which is what reads as input lag.
+        let reviews = if command_needs_prefetch(&cli) {
+            github::fetch_pending_reviews(
+                &cfg.github_token,
+                &cfg.github_org,
+                &cfg.github_repos,
+                &cfg.github_username,
+                &cfg.github_teams,
+                include_mine,
+                include_drafts,
+                &cli.exclude_prefix,
+                &crew_members,
+                cfg.max_pr_age_days,
+            )
+            .await?
+        } else {
+            Vec::new()
+        };
 
         let output_dir = cli.output_dir.clone().or_else(|| Some(reviews_dir()));
 
@@ -73,6 +83,32 @@ pub fn reviews_dir() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("."))
         .join("prctrl")
         .join("reviews")
+}
+
+/// Whether a command relies on the pending-reviews list being prefetched into
+/// `CommandContext::reviews`.
+///
+/// Returns `false` for commands that fetch their own data and never read
+/// `ctx.reviews` (so the eager fetch in `build()` is pure latency), and for the
+/// `list --pr/--pr-numbers` paths that resolve PRs by number directly. Defaults
+/// to `true` for everything else so we never skip a fetch a command depends on.
+fn command_needs_prefetch(cli: &Cli) -> bool {
+    match &cli.command {
+        // Self-sufficient commands: they fetch (or don't need) data on their own.
+        Commands::Tui { .. }
+        | Commands::Monitor { .. }
+        | Commands::MonitorStop
+        | Commands::MonitorStatus
+        | Commands::Clean { .. } => false,
+        // `list` with explicit PR target fetches by number and ignores ctx.reviews.
+        Commands::List {
+            pr_numbers: Some(_),
+            ..
+        }
+        | Commands::List { pr: Some(_), .. } => false,
+        Commands::List { .. } if cli.pr.is_some() => false,
+        _ => true,
+    }
 }
 
 /// Dispatch to the appropriate command handler based on the CLI command.
@@ -268,7 +304,7 @@ pub async fn dispatch(ctx: CommandContext) -> anyhow::Result<()> {
                     logger::print_reviews(&commented, priority);
                 }
                 if requested.is_empty() && commented.is_empty() {
-                    println!("\n✅ No pending ctx.reviews. You're all clear.\n");
+                    println!("\n✅ No pending reviews. You're all clear.\n");
                 }
                 return Ok(());
             };
@@ -316,7 +352,7 @@ pub async fn dispatch(ctx: CommandContext) -> anyhow::Result<()> {
                 let snooze_file = ctx
                     .output_dir
                     .clone()
-                    .unwrap_or_else(|| PathBuf::from("./ctx.reviews"))
+                    .unwrap_or_else(|| PathBuf::from("./reviews"))
                     .join(".snoozed.json");
 
                 let snoozed_prs = read_snoozed_prs(&snooze_file);
@@ -379,6 +415,7 @@ pub async fn dispatch(ctx: CommandContext) -> anyhow::Result<()> {
                 &ctx.cfg.github_username,
                 ctx.cli.include_drafts,
                 &ctx.cli.exclude_prefix,
+                ctx.cfg.max_pr_age_days,
             )
             .await?;
 
@@ -450,7 +487,7 @@ pub async fn dispatch(ctx: CommandContext) -> anyhow::Result<()> {
                 let snooze_file = ctx
                     .output_dir
                     .clone()
-                    .unwrap_or_else(|| PathBuf::from("./ctx.reviews"))
+                    .unwrap_or_else(|| PathBuf::from("./reviews"))
                     .join(".snoozed.json");
 
                 let snoozed_prs = read_snoozed_prs(&snooze_file);
@@ -627,7 +664,7 @@ pub async fn dispatch(ctx: CommandContext) -> anyhow::Result<()> {
                 let snooze_file = ctx
                     .output_dir
                     .clone()
-                    .unwrap_or_else(|| PathBuf::from("./ctx.reviews"))
+                    .unwrap_or_else(|| PathBuf::from("./reviews"))
                     .join(".snoozed.json");
 
                 let now = chrono::Utc::now();
@@ -789,13 +826,13 @@ pub async fn dispatch(ctx: CommandContext) -> anyhow::Result<()> {
                             .collect();
 
                         if filtered.is_empty() {
-                            println!("No matching ctx.reviews found among specified PRs.");
+                            println!("No matching reviews found among specified PRs.");
                             return Ok(());
                         }
 
                         filtered
                     } else if filtered_reviews.is_empty() {
-                        println!("No matching ctx.reviews found.");
+                        println!("No matching reviews found.");
                         return Ok(());
                     } else if all {
                         filtered_reviews.into_iter().collect()
@@ -824,7 +861,7 @@ pub async fn dispatch(ctx: CommandContext) -> anyhow::Result<()> {
             };
 
             if targets.is_empty() {
-                println!("No matching ctx.reviews found.");
+                println!("No matching reviews found.");
                 return Ok(());
             }
 
@@ -995,7 +1032,7 @@ pub async fn dispatch(ctx: CommandContext) -> anyhow::Result<()> {
             // Dry-run mode: preview which PRs would be included
             if dry_run {
                 if filtered.is_empty() {
-                    println!("No matching ctx.reviews found.");
+                    println!("No matching reviews found.");
                     return Ok(());
                 }
                 println!(
@@ -1025,14 +1062,14 @@ pub async fn dispatch(ctx: CommandContext) -> anyhow::Result<()> {
             // --all flag: show stats without interactive selection
             let stats_reviews: Vec<_> = if all {
                 if filtered.is_empty() {
-                    println!("No matching ctx.reviews found.");
+                    println!("No matching reviews found.");
                     return Ok(());
                 }
                 filtered
             } else if target_pr.is_none() {
                 // Interactive mode: let user select PRs
                 if filtered.is_empty() {
-                    println!("No matching ctx.reviews found.");
+                    println!("No matching reviews found.");
                     return Ok(());
                 }
                 logger::print_reviews(&filtered, false);
@@ -1107,7 +1144,7 @@ pub async fn dispatch(ctx: CommandContext) -> anyhow::Result<()> {
                 println!("{}", serde_json::to_string_pretty(&output)?);
             } else {
                 println!("\n📊 Review Statistics\n{}", "─".repeat(40));
-                println!("  Total pending ctx.reviews: {}", stats_reviews.len());
+                println!("  Total pending reviews: {}", stats_reviews.len());
                 println!(
                     "  Total lines changed:   +{} / -{}",
                     total_additions.to_string().green(),
@@ -1165,7 +1202,7 @@ pub async fn dispatch(ctx: CommandContext) -> anyhow::Result<()> {
                                 (r, score)
                             })
                             .collect();
-                        scored.sort_by(|a, b| b.1.cmp(&a.1)); // highest priority first
+                        scored.sort_by_key(|b| std::cmp::Reverse(b.1)); // highest priority first
 
                         // Highlight the single most urgent PR
                         if let Some((most_urgent, top_score)) = scored.first() {
@@ -1226,7 +1263,7 @@ pub async fn dispatch(ctx: CommandContext) -> anyhow::Result<()> {
                         }
                     }
                 } else {
-                    println!("\n  😴 No pending ctx.reviews. You're all clear!");
+                    println!("\n  😴 No pending reviews. You're all clear!");
                 }
 
                 println!();
@@ -1312,7 +1349,7 @@ pub async fn dispatch(ctx: CommandContext) -> anyhow::Result<()> {
                 println!("{}", serde_json::to_string_pretty(&output)?);
             } else {
                 println!("\n👥 Team Review Summary\n{}", "─".repeat(40));
-                println!("  Total pending ctx.reviews: {}", filtered.len());
+                println!("  Total pending reviews: {}", filtered.len());
 
                 if !team_counts.is_empty() {
                     println!("\n  By author:");
@@ -1345,7 +1382,7 @@ pub async fn dispatch(ctx: CommandContext) -> anyhow::Result<()> {
                             (r, score)
                         })
                         .collect();
-                    scored.sort_by(|a, b| b.1.cmp(&a.1)); // highest priority first
+                    scored.sort_by_key(|b| std::cmp::Reverse(b.1)); // highest priority first
 
                     // Group by score
                     let mut score_groups: HashMap<u8, Vec<&github::PendingReview>> = HashMap::new();
@@ -1551,7 +1588,7 @@ pub async fn dispatch(ctx: CommandContext) -> anyhow::Result<()> {
             }
 
             // Sort by pr_count descending
-            loads.sort_by(|a, b| b.pr_count.cmp(&a.pr_count));
+            loads.sort_by_key(|b| std::cmp::Reverse(b.pr_count));
 
             let total_prs = filtered.len();
             let total_load_members = loads.len();
@@ -1698,7 +1735,7 @@ pub async fn dispatch(ctx: CommandContext) -> anyhow::Result<()> {
                             (r, score)
                         })
                         .collect();
-                    scored.sort_by(|a, b| b.1.cmp(&a.1)); // highest priority first
+                    scored.sort_by_key(|b| std::cmp::Reverse(b.1)); // highest priority first
 
                     // Group by score
                     let mut score_groups: HashMap<u8, Vec<&github::PendingReview>> = HashMap::new();
@@ -1838,6 +1875,10 @@ pub async fn dispatch(ctx: CommandContext) -> anyhow::Result<()> {
             }
         }
 
+        Commands::Tui { interval } => {
+            crate::tui::run_tui(ctx.cfg, interval).await?;
+        }
+
         Commands::Diff {
             pr_number,
             pr_numbers,
@@ -1881,7 +1922,7 @@ pub async fn dispatch(ctx: CommandContext) -> anyhow::Result<()> {
             let targets: Vec<_> = if all {
                 // --all flag: use all pending ctx.reviews (already filtered)
                 if filtered_reviews.is_empty() {
-                    println!("No matching ctx.reviews found.");
+                    println!("No matching reviews found.");
                     return Ok(());
                 }
                 filtered_reviews
@@ -1926,7 +1967,7 @@ pub async fn dispatch(ctx: CommandContext) -> anyhow::Result<()> {
             } else {
                 // Interactive: show list and let user pick (using filtered ctx.reviews)
                 if filtered_reviews.is_empty() {
-                    println!("No matching ctx.reviews found.");
+                    println!("No matching reviews found.");
                     return Ok(());
                 }
                 logger::print_reviews(&filtered_reviews, false);
@@ -2203,7 +2244,7 @@ pub async fn dispatch(ctx: CommandContext) -> anyhow::Result<()> {
                     let snooze_file = ctx
                         .output_dir
                         .clone()
-                        .unwrap_or_else(|| PathBuf::from("./ctx.reviews"))
+                        .unwrap_or_else(|| PathBuf::from("./reviews"))
                         .join(".snoozed.json");
 
                     let now = chrono::Utc::now();
@@ -2254,7 +2295,7 @@ pub async fn dispatch(ctx: CommandContext) -> anyhow::Result<()> {
             let prs: Vec<github::PendingReview> =
                 if target_pr.is_none() && pr_numbers.is_none() && !all {
                     if filtered_reviews.is_empty() {
-                        println!("No matching ctx.reviews found.");
+                        println!("No matching reviews found.");
                         return Ok(());
                     }
                     logger::print_reviews(&filtered_reviews, false);
@@ -2297,7 +2338,7 @@ pub async fn dispatch(ctx: CommandContext) -> anyhow::Result<()> {
             let detail_results: Vec<Result<_, _>> = join_all(detail_futures).await;
 
             // Phase 2: Process results sequentially (already fetched, just display)
-            for (review, result) in prs.into_iter().zip(detail_results.into_iter()) {
+            for (review, result) in prs.into_iter().zip(detail_results) {
                 let full_pr = match result {
                     Ok(pr) => pr,
                     Err(e) => {
@@ -2523,7 +2564,7 @@ pub async fn dispatch(ctx: CommandContext) -> anyhow::Result<()> {
 
                 for (i, (review, timeline_result)) in prs_from_numbers
                     .iter()
-                    .zip(timeline_results.into_iter())
+                    .zip(timeline_results)
                     .enumerate()
                 {
                     let timeline = match timeline_result {
@@ -2573,7 +2614,7 @@ pub async fn dispatch(ctx: CommandContext) -> anyhow::Result<()> {
                 }
 
                 if filtered.is_empty() {
-                    println!("No matching ctx.reviews found.");
+                    println!("No matching reviews found.");
                     return Ok(());
                 }
 
@@ -2617,7 +2658,7 @@ pub async fn dispatch(ctx: CommandContext) -> anyhow::Result<()> {
 
                     for (i, (review, timeline_result)) in filtered
                         .iter()
-                        .zip(timeline_results.into_iter())
+                        .zip(timeline_results)
                         .enumerate()
                     {
                         let timeline = match timeline_result {
@@ -2693,7 +2734,7 @@ pub async fn dispatch(ctx: CommandContext) -> anyhow::Result<()> {
             let total_prs = prs.len();
 
             for (i, (review, timeline_result)) in
-                prs.iter().zip(timeline_results.into_iter()).enumerate()
+                prs.iter().zip(timeline_results).enumerate()
             {
                 let timeline = match timeline_result {
                     Ok(t) => t,
@@ -2757,7 +2798,7 @@ pub async fn dispatch(ctx: CommandContext) -> anyhow::Result<()> {
                 let snooze_file = ctx
                     .output_dir
                     .clone()
-                    .unwrap_or_else(|| PathBuf::from("./ctx.reviews"))
+                    .unwrap_or_else(|| PathBuf::from("./reviews"))
                     .join(".snoozed.json");
 
                 let now = chrono::Utc::now();
@@ -2807,7 +2848,7 @@ pub async fn dispatch(ctx: CommandContext) -> anyhow::Result<()> {
             let targets: Vec<_> = if all {
                 // --all flag: use all pending ctx.reviews (already filtered)
                 if filtered_reviews.is_empty() {
-                    println!("No matching ctx.reviews found.");
+                    println!("No matching reviews found.");
                     return Ok(());
                 }
                 filtered_reviews
@@ -2872,14 +2913,14 @@ pub async fn dispatch(ctx: CommandContext) -> anyhow::Result<()> {
                 };
 
                 if filtered.is_empty() && all_prs_len > 0 {
-                    println!("❌ No matching ctx.reviews found among specified PRs.");
+                    println!("❌ No matching reviews found among specified PRs.");
                     return Ok(());
                 }
                 filtered
             } else {
                 // Interactive: show list and let user pick (using filtered ctx.reviews)
                 if filtered_reviews.is_empty() {
-                    println!("No matching ctx.reviews found.");
+                    println!("No matching reviews found.");
                     return Ok(());
                 }
                 logger::print_reviews(&filtered_reviews, false);
@@ -3051,7 +3092,7 @@ pub async fn dispatch(ctx: CommandContext) -> anyhow::Result<()> {
 
             let prs: Vec<github::PendingReview> = if all {
                 if filtered_reviews.is_empty() {
-                    println!("No matching ctx.reviews found.");
+                    println!("No matching reviews found.");
                     return Ok(());
                 }
                 filtered_reviews.clone()
@@ -3127,7 +3168,7 @@ pub async fn dispatch(ctx: CommandContext) -> anyhow::Result<()> {
                 }
             } else {
                 if filtered_reviews.is_empty() {
-                    println!("No matching ctx.reviews found.");
+                    println!("No matching reviews found.");
                     return Ok(());
                 }
                 logger::print_reviews(&filtered_reviews, priority);
@@ -3208,7 +3249,7 @@ pub async fn dispatch(ctx: CommandContext) -> anyhow::Result<()> {
 
             let assign_results: Vec<Result<_, _>> = join_all(assign_futures).await;
 
-            for (review, result) in prs.iter().zip(assign_results.into_iter()) {
+            for (review, result) in prs.iter().zip(assign_results) {
                 if !json && !quiet {
                     print!(
                         "\n⏳ Requesting review on #{} {}... ",
@@ -3303,7 +3344,7 @@ pub async fn dispatch(ctx: CommandContext) -> anyhow::Result<()> {
 
             let prs: Vec<github::PendingReview> = if all {
                 if filtered_reviews.is_empty() {
-                    println!("No matching ctx.reviews found.");
+                    println!("No matching reviews found.");
                     return Ok(());
                 }
                 filtered_reviews.clone()
@@ -3379,7 +3420,7 @@ pub async fn dispatch(ctx: CommandContext) -> anyhow::Result<()> {
                 }
             } else {
                 if filtered_reviews.is_empty() {
-                    println!("No matching ctx.reviews found.");
+                    println!("No matching reviews found.");
                     return Ok(());
                 }
                 logger::print_reviews(&filtered_reviews, priority);
@@ -3460,7 +3501,7 @@ pub async fn dispatch(ctx: CommandContext) -> anyhow::Result<()> {
 
             let unassign_results: Vec<Result<_, _>> = join_all(unassign_futures).await;
 
-            for (review, result) in prs.iter().zip(unassign_results.into_iter()) {
+            for (review, result) in prs.iter().zip(unassign_results) {
                 if !json && !quiet {
                     print!(
                         "\n⏳ Removing yourself from review on #{} {}... ",
@@ -3556,7 +3597,7 @@ pub async fn dispatch(ctx: CommandContext) -> anyhow::Result<()> {
 
             let prs: Vec<github::PendingReview> = if all {
                 if filtered_reviews.is_empty() {
-                    println!("No matching ctx.reviews found.");
+                    println!("No matching reviews found.");
                     return Ok(());
                 }
                 filtered_reviews.clone()
@@ -3632,7 +3673,7 @@ pub async fn dispatch(ctx: CommandContext) -> anyhow::Result<()> {
                 }
             } else {
                 if filtered_reviews.is_empty() {
-                    println!("No matching ctx.reviews found.");
+                    println!("No matching reviews found.");
                     return Ok(());
                 }
                 logger::print_reviews(&filtered_reviews, priority);
@@ -3708,7 +3749,7 @@ pub async fn dispatch(ctx: CommandContext) -> anyhow::Result<()> {
 
             let comment_results: Vec<Result<_, _>> = join_all(comment_futures).await;
 
-            for (review, result) in prs.iter().zip(comment_results.into_iter()) {
+            for (review, result) in prs.iter().zip(comment_results) {
                 if !json && !quiet {
                     print!(
                         "\n💬 Posting comment on #{} {}... ",
@@ -3802,7 +3843,7 @@ pub async fn dispatch(ctx: CommandContext) -> anyhow::Result<()> {
                     let snooze_file = ctx
                         .output_dir
                         .clone()
-                        .unwrap_or_else(|| PathBuf::from("./ctx.reviews"))
+                        .unwrap_or_else(|| PathBuf::from("./reviews"))
                         .join(".snoozed.json");
 
                     let now = chrono::Utc::now();
@@ -3852,7 +3893,7 @@ pub async fn dispatch(ctx: CommandContext) -> anyhow::Result<()> {
 
             let prs: Vec<github::PendingReview> = if all {
                 if filtered_reviews.is_empty() {
-                    println!("No matching ctx.reviews found.");
+                    println!("No matching reviews found.");
                     return Ok(());
                 }
                 filtered_reviews.clone()
@@ -3928,7 +3969,7 @@ pub async fn dispatch(ctx: CommandContext) -> anyhow::Result<()> {
                 }
             } else {
                 if filtered_reviews.is_empty() {
-                    println!("No matching ctx.reviews found.");
+                    println!("No matching reviews found.");
                     return Ok(());
                 }
                 logger::print_reviews(&filtered_reviews, priority);
@@ -4202,7 +4243,7 @@ pub async fn dispatch(ctx: CommandContext) -> anyhow::Result<()> {
 
             let targets: Vec<_> = if all {
                 if filtered_reviews.is_empty() {
-                    println!("No matching ctx.reviews found.");
+                    println!("No matching reviews found.");
                     return Ok(());
                 }
                 filtered_reviews.into_iter().collect()
@@ -4235,7 +4276,7 @@ pub async fn dispatch(ctx: CommandContext) -> anyhow::Result<()> {
                 all_prs
             } else {
                 if filtered_reviews.is_empty() {
-                    println!("No matching ctx.reviews found.");
+                    println!("No matching reviews found.");
                     return Ok(());
                 }
                 logger::print_reviews(&filtered_reviews, priority);
@@ -4324,7 +4365,7 @@ pub async fn dispatch(ctx: CommandContext) -> anyhow::Result<()> {
             let claim_results: Vec<Result<_, _>> = join_all(claim_futures).await;
 
             let total = targets.len();
-            for (review, result) in targets.into_iter().zip(claim_results.into_iter()) {
+            for (review, result) in targets.into_iter().zip(claim_results) {
                 match result {
                     Ok(_) => {
                         if !json && !quiet {
@@ -4430,7 +4471,7 @@ pub async fn dispatch(ctx: CommandContext) -> anyhow::Result<()> {
                 let snooze_file = ctx
                     .output_dir
                     .clone()
-                    .unwrap_or_else(|| PathBuf::from("./ctx.reviews"))
+                    .unwrap_or_else(|| PathBuf::from("./reviews"))
                     .join(".snoozed.json");
 
                 let now = chrono::Utc::now();
@@ -4480,7 +4521,7 @@ pub async fn dispatch(ctx: CommandContext) -> anyhow::Result<()> {
             let targets: Vec<_> = if all {
                 // Show files for all pending ctx.reviews (already filtered)
                 if filtered.is_empty() {
-                    println!("No matching ctx.reviews found.");
+                    println!("No matching reviews found.");
                     return Ok(());
                 }
                 filtered
@@ -4523,7 +4564,7 @@ pub async fn dispatch(ctx: CommandContext) -> anyhow::Result<()> {
             } else {
                 // Interactive: show list and let user pick (using filtered ctx.reviews)
                 if filtered.is_empty() {
-                    println!("No matching ctx.reviews found.");
+                    println!("No matching reviews found.");
                     return Ok(());
                 }
                 logger::print_reviews(&filtered, false);
@@ -4780,7 +4821,7 @@ pub async fn dispatch(ctx: CommandContext) -> anyhow::Result<()> {
                 let snooze_file = ctx
                     .output_dir
                     .clone()
-                    .unwrap_or_else(|| PathBuf::from("./ctx.reviews"))
+                    .unwrap_or_else(|| PathBuf::from("./reviews"))
                     .join(".snoozed.json");
 
                 let now = chrono::Utc::now();
@@ -4828,7 +4869,7 @@ pub async fn dispatch(ctx: CommandContext) -> anyhow::Result<()> {
             };
 
             if filtered.is_empty() {
-                println!("\n🔍 No ctx.reviews matching '{}' found.\n", query.yellow());
+                println!("\n🔍 No reviews matching '{}' found.\n", query.yellow());
                 return Ok(());
             }
 
@@ -5033,7 +5074,7 @@ pub async fn dispatch(ctx: CommandContext) -> anyhow::Result<()> {
                 let snooze_file = ctx
                     .output_dir
                     .clone()
-                    .unwrap_or_else(|| PathBuf::from("./ctx.reviews"))
+                    .unwrap_or_else(|| PathBuf::from("./reviews"))
                     .join(".snoozed.json");
 
                 let now = chrono::Utc::now();
@@ -5084,7 +5125,7 @@ pub async fn dispatch(ctx: CommandContext) -> anyhow::Result<()> {
                 if let Some(pr_num) = target_pr {
                     println!("\n⚠️  PR #{} not found or doesn't match filters.\n", pr_num);
                 } else {
-                    println!("\n🔍 No ctx.reviews match the specified filters.\n");
+                    println!("\n🔍 No reviews match the specified filters.\n");
                 }
                 return Ok(());
             }
@@ -5172,7 +5213,7 @@ pub async fn dispatch(ctx: CommandContext) -> anyhow::Result<()> {
 
             let targets: Vec<_> = if all {
                 if filtered_reviews.is_empty() {
-                    println!("No matching ctx.reviews found.");
+                    println!("No matching reviews found.");
                     return Ok(());
                 }
                 filtered_reviews
@@ -5216,7 +5257,7 @@ pub async fn dispatch(ctx: CommandContext) -> anyhow::Result<()> {
                 all_prs
             } else {
                 if filtered_reviews.is_empty() {
-                    println!("No matching ctx.reviews found.");
+                    println!("No matching reviews found.");
                     return Ok(());
                 }
                 logger::print_reviews(&filtered_reviews, false);
@@ -5478,7 +5519,7 @@ pub async fn dispatch(ctx: CommandContext) -> anyhow::Result<()> {
                     None if all && !filtered_reviews.is_empty() => filtered_reviews,
                     None => {
                         if filtered_reviews.is_empty() {
-                            println!("No matching ctx.reviews found.");
+                            println!("No matching reviews found.");
                             return Ok(());
                         }
                         logger::print_reviews(&filtered_reviews, false);
@@ -5806,7 +5847,7 @@ pub async fn dispatch(ctx: CommandContext) -> anyhow::Result<()> {
             let snooze_file = ctx
                 .output_dir
                 .clone()
-                .unwrap_or_else(|| PathBuf::from("./ctx.reviews"))
+                .unwrap_or_else(|| PathBuf::from("./reviews"))
                 .join(".snoozed.json");
 
             let now = chrono::Utc::now();
@@ -5857,7 +5898,7 @@ pub async fn dispatch(ctx: CommandContext) -> anyhow::Result<()> {
 
             if top_prs.is_empty() {
                 println!(
-                    "\n🎯 No high-priority ctx.reviews found (min score: {})\n",
+                    "\n🎯 No high-priority reviews found (min score: {})\n",
                     min_score
                 );
                 return Ok(());
@@ -7238,7 +7279,7 @@ pub async fn dispatch(ctx: CommandContext) -> anyhow::Result<()> {
             let snooze_file = ctx
                 .output_dir
                 .clone()
-                .unwrap_or_else(|| PathBuf::from("./ctx.reviews"))
+                .unwrap_or_else(|| PathBuf::from("./reviews"))
                 .join(".snoozed.json");
 
             #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -7334,9 +7375,7 @@ pub async fn dispatch(ctx: CommandContext) -> anyhow::Result<()> {
                         }
 
                         if filtered.is_empty() {
-                            println!(
-                                "No pending ctx.reviews found to snooze (or none match filters)."
-                            );
+                            println!("No pending reviews found to snooze (or none match filters).");
                             return Ok(());
                         }
                         logger::print_reviews(&filtered, false);
@@ -8007,7 +8046,7 @@ pub async fn dispatch(ctx: CommandContext) -> anyhow::Result<()> {
             let follow_file = ctx
                 .output_dir
                 .clone()
-                .unwrap_or_else(|| PathBuf::from("./ctx.reviews"))
+                .unwrap_or_else(|| PathBuf::from("./reviews"))
                 .join(".followed.json");
 
             #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -8091,7 +8130,7 @@ pub async fn dispatch(ctx: CommandContext) -> anyhow::Result<()> {
                         };
 
                         if filtered_reviews.is_empty() {
-                            println!("No pending ctx.reviews found to follow. Use --pr flag or specify PR numbers.");
+                            println!("No pending reviews found to follow. Use --pr flag or specify PR numbers.");
                             return Ok(());
                         }
                         logger::print_reviews(&filtered_reviews, false);
@@ -9035,7 +9074,7 @@ pub async fn dispatch(ctx: CommandContext) -> anyhow::Result<()> {
                 let mut sent = 0;
                 let mut failed = 0;
 
-                for (entry, result) in chase_entries.iter().zip(results.into_iter()) {
+                for (entry, result) in chase_entries.iter().zip(results) {
                     match result {
                         Ok(_) => {
                             if !quiet {
@@ -9133,7 +9172,7 @@ pub async fn dispatch(ctx: CommandContext) -> anyhow::Result<()> {
                 .await?
             } else if all {
                 if filtered_reviews.is_empty() {
-                    println!("No matching ctx.reviews found.");
+                    println!("No matching reviews found.");
                     return Ok(());
                 }
                 filtered_reviews
@@ -9164,7 +9203,7 @@ pub async fn dispatch(ctx: CommandContext) -> anyhow::Result<()> {
                 all_prs
             } else {
                 if filtered_reviews.is_empty() {
-                    println!("No matching ctx.reviews found.");
+                    println!("No matching reviews found.");
                     return Ok(());
                 }
                 logger::print_reviews(&filtered_reviews, false);
@@ -9495,11 +9534,11 @@ pub async fn dispatch(ctx: CommandContext) -> anyhow::Result<()> {
             let report_output_dir = ctx
                 .output_dir
                 .clone()
-                .unwrap_or_else(|| PathBuf::from("./ctx.reviews"));
+                .unwrap_or_else(|| PathBuf::from("./reviews"));
 
             if !report_output_dir.exists() {
                 println!(
-                    "❌ No ctx.reviews directory found at {}. Run `prctrl list` first to save ctx.reviews.",
+                    "❌ No reviews directory found at {}. Run `prctrl list` first to save reviews.",
                     report_output_dir.display()
                 );
                 return Ok(());
@@ -9822,7 +9861,7 @@ pub async fn dispatch(ctx: CommandContext) -> anyhow::Result<()> {
                             (r, score)
                         })
                         .collect();
-                    scored.sort_by(|a, b| b.1.cmp(&a.1)); // highest priority first
+                    scored.sort_by_key(|b| std::cmp::Reverse(b.1)); // highest priority first
 
                     // Group by score
                     let mut score_groups: HashMap<u8, Vec<&github::PendingReview>> = HashMap::new();
@@ -9941,7 +9980,7 @@ pub async fn dispatch(ctx: CommandContext) -> anyhow::Result<()> {
                                 join_all(fetch_futures).await;
                             let mut score_map: std::collections::HashMap<(String, u64), u8> =
                                 std::collections::HashMap::new();
-                            for (activity, result) in activities.iter().zip(results.into_iter()) {
+                            for (activity, result) in activities.iter().zip(results) {
                                 if let Ok(prs) = result {
                                     if let Some(pr) = prs.into_iter().next() {
                                         score_map.insert(
@@ -10292,12 +10331,12 @@ pub async fn dispatch(ctx: CommandContext) -> anyhow::Result<()> {
             let report_output_dir = ctx
                 .output_dir
                 .clone()
-                .unwrap_or_else(|| PathBuf::from("./ctx.reviews"));
+                .unwrap_or_else(|| PathBuf::from("./reviews"));
             let n = limit.unwrap_or(10);
 
             if !report_output_dir.exists() {
                 println!(
-                    "❌ No ctx.reviews directory found at {}. Run `prctrl list` first to save ctx.reviews.",
+                    "❌ No reviews directory found at {}. Run `prctrl list` first to save reviews.",
                     report_output_dir.display()
                 );
                 return Ok(());
@@ -10598,13 +10637,13 @@ pub async fn dispatch(ctx: CommandContext) -> anyhow::Result<()> {
 
                 if review_count == 0 {
                     println!("  😴 No review data found in the last {} days.", days);
-                    println!("  Process some ctx.reviews first with `prctrl delegate`.\n");
+                    println!("  Process some reviews first with `prctrl delegate`.\n");
                     return Ok(());
                 }
 
                 // ── Summary stats ──
                 println!("  📊 Summary");
-                println!("     Total ctx.reviews:       {}", review_count);
+                println!("     Total reviews:       {}", review_count);
                 println!("     Daily average:       {:.1} PRs/day", avg_per_day);
                 println!(
                     "     Lines reviewed:      +{} / -{}",
@@ -10744,11 +10783,11 @@ pub async fn dispatch(ctx: CommandContext) -> anyhow::Result<()> {
             let report_output_dir = ctx
                 .output_dir
                 .clone()
-                .unwrap_or_else(|| PathBuf::from("./ctx.reviews"));
+                .unwrap_or_else(|| PathBuf::from("./reviews"));
 
             if !report_output_dir.exists() {
                 println!(
-                    "❌ No ctx.reviews directory found at {}. Run `prctrl delegate` first.",
+                    "❌ No reviews directory found at {}. Run `prctrl delegate` first.",
                     report_output_dir.display()
                 );
                 return Ok(());
@@ -10961,7 +11000,7 @@ pub async fn dispatch(ctx: CommandContext) -> anyhow::Result<()> {
                         "─".repeat(45)
                     );
                     println!("  😴 No review data found in the last {} days.", days);
-                    println!("  Process some ctx.reviews first with `prctrl delegate`.\n");
+                    println!("  Process some reviews first with `prctrl delegate`.\n");
                 }
                 return Ok(());
             }
@@ -11250,7 +11289,7 @@ pub async fn dispatch(ctx: CommandContext) -> anyhow::Result<()> {
             let snooze_file = ctx
                 .output_dir
                 .clone()
-                .unwrap_or_else(|| PathBuf::from("./ctx.reviews"))
+                .unwrap_or_else(|| PathBuf::from("./reviews"))
                 .join(".snoozed.json");
 
             let now = chrono::Utc::now();
@@ -11305,7 +11344,7 @@ pub async fn dispatch(ctx: CommandContext) -> anyhow::Result<()> {
                         }))?
                     );
                 } else {
-                    println!("✅ No pending ctx.reviews. You're all clear!");
+                    println!("✅ No pending reviews. You're all clear!");
                 }
                 return Ok(());
             }
@@ -11456,7 +11495,7 @@ pub async fn dispatch(ctx: CommandContext) -> anyhow::Result<()> {
                             (r, score)
                         })
                         .collect();
-                    scored.sort_by(|a, b| b.1.cmp(&a.1)); // highest priority first
+                    scored.sort_by_key(|b| std::cmp::Reverse(b.1)); // highest priority first
 
                     // Group by score
                     let mut score_groups: HashMap<u8, Vec<&github::PendingReview>> = HashMap::new();
@@ -11557,7 +11596,7 @@ pub async fn dispatch(ctx: CommandContext) -> anyhow::Result<()> {
             let snooze_file = ctx
                 .output_dir
                 .clone()
-                .unwrap_or_else(|| PathBuf::from("./ctx.reviews"))
+                .unwrap_or_else(|| PathBuf::from("./reviews"))
                 .join(".snoozed.json");
 
             let now = chrono::Utc::now();
@@ -11601,11 +11640,11 @@ pub async fn dispatch(ctx: CommandContext) -> anyhow::Result<()> {
                         serde_json::to_string_pretty(&serde_json::json!({
                             "total": 0,
                             "high_attention": [],
-                            "message": "No pending ctx.reviews — nothing demands attention!"
+                            "message": "No pending reviews — nothing demands attention!"
                         }))?
                     );
                 } else {
-                    println!("✅ No pending ctx.reviews. Nothing demands your attention!");
+                    println!("✅ No pending reviews. Nothing demands your attention!");
                 }
                 return Ok(());
             }
@@ -11955,7 +11994,7 @@ pub async fn dispatch(ctx: CommandContext) -> anyhow::Result<()> {
                 let snooze_file = ctx
                     .output_dir
                     .clone()
-                    .unwrap_or_else(|| PathBuf::from("./ctx.reviews"))
+                    .unwrap_or_else(|| PathBuf::from("./reviews"))
                     .join(".snoozed.json");
 
                 let now = chrono::Utc::now();
@@ -12011,13 +12050,13 @@ pub async fn dispatch(ctx: CommandContext) -> anyhow::Result<()> {
                         serde_json::to_string_pretty(&serde_json::json!({
                             "focused": null,
                             "total_pending": ctx.reviews.len(),
-                            "message": "No matching ctx.reviews found."
+                            "message": "No matching reviews found."
                         }))?
                     );
                 } else {
                     println!("🎯 No matching PRs found.");
                     if let Some(pr_num) = target_pr {
-                        println!("   PR #{} not found in pending ctx.reviews.", pr_num);
+                        println!("   PR #{} not found in pending reviews.", pr_num);
                     } else {
                         println!("   No PR matches your filters (--repo, --author).");
                     }
@@ -12187,7 +12226,7 @@ pub async fn dispatch(ctx: CommandContext) -> anyhow::Result<()> {
                 .await?
             } else if all {
                 if ctx.reviews.is_empty() {
-                    println!("No pending ctx.reviews found.");
+                    println!("No pending reviews found.");
                     return Ok(());
                 }
                 // Apply --repo, --author, and --since-days filters to --all results
@@ -12234,7 +12273,7 @@ pub async fn dispatch(ctx: CommandContext) -> anyhow::Result<()> {
                 all_prs
             } else {
                 if ctx.reviews.is_empty() {
-                    println!("No pending ctx.reviews found.");
+                    println!("No pending reviews found.");
                     return Ok(());
                 }
                 // Apply --repo, --author, and --since-days filters early (reduce API calls)
@@ -12458,7 +12497,7 @@ pub async fn dispatch(ctx: CommandContext) -> anyhow::Result<()> {
             } else if all {
                 // --all flag: use all filtered pending ctx.reviews
                 if filtered_reviews.is_empty() {
-                    println!("No pending ctx.reviews found.");
+                    println!("No pending reviews found.");
                     return Ok(());
                 }
                 filtered_reviews
@@ -13170,6 +13209,7 @@ pub async fn dispatch(ctx: CommandContext) -> anyhow::Result<()> {
                     ctx.cli.include_drafts,
                     &ctx.cli.exclude_prefix,
                     &ctx.cfg.crew_members,
+                    ctx.cfg.max_pr_age_days,
                 )
                 .await?
             } else {
@@ -13210,7 +13250,7 @@ pub async fn dispatch(ctx: CommandContext) -> anyhow::Result<()> {
             };
 
             if reviews_to_export.is_empty() {
-                println!("No ctx.reviews to export.");
+                println!("No reviews to export.");
                 return Ok(());
             }
 
@@ -13382,13 +13422,13 @@ pub async fn dispatch(ctx: CommandContext) -> anyhow::Result<()> {
                 std::fs::write(path, &output_content)?;
                 if json {
                     println!(
-                        "✅ Exported {} ctx.reviews to {} (JSON)",
+                        "✅ Exported {} reviews to {} (JSON)",
                         reviews_to_export.len(),
                         path.display()
                     );
                 } else {
                     println!(
-                        "✅ Exported {} ctx.reviews to {}",
+                        "✅ Exported {} reviews to {}",
                         reviews_to_export.len(),
                         path.display()
                     );
@@ -13411,11 +13451,11 @@ pub async fn dispatch(ctx: CommandContext) -> anyhow::Result<()> {
             let history_output_dir = ctx
                 .output_dir
                 .clone()
-                .unwrap_or_else(|| PathBuf::from("./ctx.reviews"));
+                .unwrap_or_else(|| PathBuf::from("./reviews"));
 
             if !history_output_dir.exists() {
                 println!(
-                    "❌ No ctx.reviews directory found at {}. Run `prctrl list` first to save ctx.reviews.",
+                    "❌ No reviews directory found at {}. Run `prctrl list` first to save reviews.",
                     history_output_dir.display()
                 );
                 return Ok(());
@@ -13789,7 +13829,7 @@ pub async fn dispatch(ctx: CommandContext) -> anyhow::Result<()> {
             let mut ready_prs = Vec::new();
 
             for ((repo_name, pr_number), result) in
-                fetch_tasks.iter().zip(detail_results.into_iter())
+                fetch_tasks.iter().zip(detail_results)
             {
                 let review = match review_lookup.get(&(repo_name.clone(), *pr_number)) {
                     Some(r) => r,
@@ -13999,7 +14039,7 @@ pub async fn dispatch(ctx: CommandContext) -> anyhow::Result<()> {
                     println!("{}", serde_json::to_string_pretty(&serde_json::json!([]))?);
                 } else {
                     println!("\n🚧 Blocked PRs — 0 total\n{}", "─".repeat(50));
-                    println!("  🎉 No pending ctx.reviews found.");
+                    println!("  🎉 No pending reviews found.");
                 }
                 return Ok(());
             }
@@ -14061,7 +14101,7 @@ pub async fn dispatch(ctx: CommandContext) -> anyhow::Result<()> {
 
             for (idx, (review, pr_result)) in filtered_reviews
                 .iter()
-                .zip(pr_results.into_iter())
+                .zip(pr_results)
                 .enumerate()
             {
                 let ci_status = ci_map
@@ -14270,7 +14310,7 @@ pub async fn dispatch(ctx: CommandContext) -> anyhow::Result<()> {
                 .await?
             } else if all {
                 if filtered_reviews.is_empty() {
-                    println!("No matching ctx.reviews found.");
+                    println!("No matching reviews found.");
                     return Ok(());
                 }
                 filtered_reviews
@@ -14297,7 +14337,7 @@ pub async fn dispatch(ctx: CommandContext) -> anyhow::Result<()> {
                 matched
             } else {
                 if filtered_reviews.is_empty() {
-                    println!("No matching ctx.reviews found.");
+                    println!("No matching reviews found.");
                     return Ok(());
                 }
                 // Skip interactive selection in dry-run mode
@@ -14407,7 +14447,7 @@ pub async fn dispatch(ctx: CommandContext) -> anyhow::Result<()> {
                 let mut sent = 0;
                 let mut failed = 0;
 
-                for (review, result) in targets.iter().zip(results.into_iter()) {
+                for (review, result) in targets.iter().zip(results) {
                     match result {
                         Ok(_) => {
                             println!("  ✅ #{} — {}", review.pr_number, review.pr_title.dimmed());
