@@ -263,6 +263,12 @@ pub enum Commands {
     MonitorStop,
     /// Check if monitor process is running
     MonitorStatus,
+    /// Launch the Terminal User Interface
+    Tui {
+        /// Refresh interval in seconds (default: 30)
+        #[arg(long, short = 'i', default_value_t = 30)]
+        interval: u64,
+    },
     /// Show diff/stats for a specific PR directly in terminal
     Diff {
         /// PR number to show diff for

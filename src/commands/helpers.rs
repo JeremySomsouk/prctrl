@@ -310,22 +310,40 @@ pub fn parse_selection(input: &str, total: usize) -> Selection {
     }
 
     let mut indices = BTreeSet::new();
+    let mut ignored: Vec<String> = Vec::new();
 
     for part in input.split(',') {
         let part = part.trim();
+        if part.is_empty() {
+            continue;
+        }
         if let Some((start, end)) = part.split_once('-') {
-            if let (Ok(s), Ok(e)) = (start.trim().parse::<usize>(), end.trim().parse::<usize>()) {
-                if s >= 1 && e >= s && e <= total {
+            match (start.trim().parse::<usize>(), end.trim().parse::<usize>()) {
+                (Ok(s), Ok(e)) if s >= 1 && e >= s && e <= total => {
                     for i in s..=e {
                         indices.insert(i - 1);
                     }
                 }
+                _ => ignored.push(part.to_string()),
             }
         } else if let Ok(n) = part.parse::<usize>() {
             if n >= 1 && n <= total {
                 indices.insert(n - 1);
+            } else {
+                ignored.push(part.to_string());
             }
+        } else {
+            ignored.push(part.to_string());
         }
+    }
+
+    // Give the user explicit feedback instead of silently dropping bad tokens.
+    if !ignored.is_empty() {
+        eprintln!(
+            "⚠️  Ignored invalid selection(s): {} (valid range: 1-{})",
+            ignored.join(", "),
+            total
+        );
     }
 
     Selection::Indices(indices.into_iter().collect())
