@@ -1,6 +1,6 @@
 use crate::config::Config;
 use crate::tui::app::App;
-use crate::tui::events::{start_tick_generator, Event};
+use crate::tui::events::Event;
 use crate::tui::ui::Ui;
 use anyhow::{Context, Result};
 use crossterm::event::Event as CrosstermEvent;
@@ -14,7 +14,7 @@ use std::time::Duration;
 
 /// Run the TUI application
 pub async fn run_tui(config: Config, refresh_interval: u64) -> Result<()> {
-    // Initialize terminal
+    // Initialize terminal - MUST be done first
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen)?;
@@ -27,14 +27,14 @@ pub async fn run_tui(config: Config, refresh_interval: u64) -> Result<()> {
         .await
         .context("Failed to initialize TUI app")?;
     
-    // Start tick generator for periodic updates
-    let mut tick_receiver = start_tick_generator(Duration::from_millis(200)); // Faster ticks for spinner
-    
     // Draw the UI once to show loading screen before fetching
     terminal.draw(|frame| Ui::draw(frame, &mut app))?;
     
     // First, load the current tab (PendingReviews) synchronously
     app.refresh().await?;
+    
+    // Redraw after initial load
+    terminal.draw(|frame| Ui::draw(frame, &mut app))?;
     
     // Then, preload all other tabs asynchronously in the background
     // This will populate the cache so subsequent tab switches are instant
@@ -50,63 +50,29 @@ pub async fn run_tui(config: Config, refresh_interval: u64) -> Result<()> {
     
     // Main event loop
     loop {
-        // Check for events with timeout
+        // Calculate timeout based on next refresh
         let refresh_duration = app.next_refresh_duration();
-        let wait_time = if refresh_duration.is_zero() {
-            // If refresh is due, use a small timeout
+        let timeout = if refresh_duration.is_zero() {
             Duration::from_millis(100)
         } else {
-            // Wait until next refresh or event
             refresh_duration.min(Duration::from_millis(500))
         };
         
-        // Use select! to wait for either an event or timeout
-        tokio::select! {
-            // Check for keyboard events using crossterm poll
-            _ = tokio::time::sleep(wait_time) => {
-                // First check if there's a key event
-                if crossterm::event::poll(Duration::from_millis(0)).unwrap_or(false) {
-                    if let Ok(CrosstermEvent::Key(key)) = crossterm::event::read() {
-                        if !handle_event(&mut app, Event::Key(key)).await? {
-                            break;
-                        }
-                        // Redraw after handling key event
-                        terminal.draw(|frame| Ui::draw(frame, &mut app))?;
-                        continue; // We handled an event, skip the timeout logic
-                    }
+        // Poll for events with timeout
+        if crossterm::event::poll(timeout).unwrap_or(false) {
+            // Event available - read it
+            if let Ok(CrosstermEvent::Key(key)) = crossterm::event::read() {
+                if !handle_event(&mut app, Event::Key(key)).await? {
+                    break;
                 }
-                
-                // Check for tick events
-                match tick_receiver.try_recv() {
-                    Ok(Event::Tick) => {
-                        app.spinner_frame = app.spinner_frame.wrapping_add(1);
-                        terminal.draw(|frame| Ui::draw(frame, &mut app))?;
-                        continue;
-                    }
-                    Ok(_) => {}
-                    Err(_) => {}
-                }
-                
-                // Check if we should refresh
-                if app.next_refresh_duration().is_zero() {
-                    app.refresh().await?;
-                    terminal.draw(|frame| Ui::draw(frame, &mut app))?;
-                }
+                // Redraw after handling key event
+                terminal.draw(|frame| Ui::draw(frame, &mut app))?;
             }
-            // Check for tick events (every second for spinner animation, etc.)
-            Some(event) = tick_receiver.recv() => {
-                match event {
-                    Event::Tick => {
-                        // Update spinner animation frame
-                        app.spinner_frame = app.spinner_frame.wrapping_add(1);
-                        terminal.draw(|frame| Ui::draw(frame, &mut app))?;
-                    }
-                    Event::Quit => break,
-                    _ => {}
-                }
-            }
-            else => {
-                break;
+        } else {
+            // Timeout - check if we should refresh
+            if app.next_refresh_duration().is_zero() {
+                app.refresh().await?;
+                terminal.draw(|frame| Ui::draw(frame, &mut app))?;
             }
         }
     }
