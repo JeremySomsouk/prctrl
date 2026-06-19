@@ -1,9 +1,9 @@
 use crate::github::PendingReview;
-use chrono::{DateTime, Utc, Duration};
+use chrono::{DateTime, Duration, Utc};
+use once_cell::sync::Lazy;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use once_cell::sync::Lazy;
 
 /// Cache key for identifying cached data
 #[derive(Debug, Clone, Hash, Eq, PartialEq)]

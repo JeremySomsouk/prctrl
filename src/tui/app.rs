@@ -157,7 +157,7 @@ impl App {
     /// Create a new App instance
     pub async fn new(config: Config, refresh_interval: u64) -> Result<Self> {
         let tabs = Tab::all();
-        
+
         // Create app with empty reviews and loading state
         // The actual data fetch will happen in the first refresh
         Ok(Self {
@@ -168,7 +168,7 @@ impl App {
             tabs,
             refresh_interval,
             last_refresh: None,
-            loading: true,  // Show loading indicator initially
+            loading: true, // Show loading indicator initially
             error: None,
             info: None,
             filter: String::new(),
@@ -275,7 +275,7 @@ impl App {
             Tab::Crew => self.config.crew_members.clone(),
             _ => vec![],
         };
-        
+
         let tab_type = match self.active_tab {
             Tab::PendingReviews => "pending_reviews",
             Tab::MyPullRequests => "my_prs",
@@ -283,7 +283,7 @@ impl App {
             Tab::Statistics => "statistics",
             Tab::MonitorLive => "monitor_live",
         };
-        
+
         CacheKeyBuilder::new()
             .org(&self.config.github_org)
             .repos(&self.config.github_repos)
@@ -302,11 +302,11 @@ impl App {
         self.loading = true;
         self.error = None;
         self.info = None;
-        
+
         // Monitor Live tab always fetches fresh data (bypasses cache)
         if self.active_tab != Tab::MonitorLive {
             let cache_key = self.get_cache_key();
-            
+
             // Try to get from cache first
             if let Some(cached_reviews) = self.cache.get(&cache_key).await {
                 self.reviews = cached_reviews;
@@ -317,33 +317,29 @@ impl App {
                 return Ok(());
             }
         }
-        
+
         // For Crew tab, pass crew_members from config; for other tabs, pass empty vec
         let crew_members: Vec<String> = match self.active_tab {
             Tab::Crew => self.config.crew_members.clone(),
             _ => vec![],
         };
-        
-        self.reviews = Self::fetch_reviews_for_tab(
-            &self.config,
-            &self.active_tab,
-            &crew_members,
-        )
-        .await?;
-        
+
+        self.reviews =
+            Self::fetch_reviews_for_tab(&self.config, &self.active_tab, &crew_members).await?;
+
         // Cache the results (except for Monitor Live tab)
         if self.active_tab != Tab::MonitorLive {
             let cache_key = self.get_cache_key();
             self.cache.set(cache_key, self.reviews.clone()).await;
         }
-        
+
         // Update filtered indices after reviews change
         self.update_filtered_indices();
-        
+
         self.loading = false;
         self.last_refresh = Some(chrono::Utc::now());
         self.selected_pr = self.selected_pr.min(self.reviews.len().saturating_sub(1));
-        
+
         Ok(())
     }
 
@@ -352,7 +348,7 @@ impl App {
         // Clear cache for current tab
         let cache_key = self.get_cache_key();
         self.cache.invalidate(&cache_key).await;
-        
+
         // Reload
         self.refresh().await
     }
@@ -361,7 +357,7 @@ impl App {
     pub async fn clear_cache_and_refresh(&mut self) -> Result<()> {
         // Clear all cache
         self.cache.clear().await;
-        
+
         // Reload current tab
         self.refresh().await
     }
@@ -369,13 +365,13 @@ impl App {
     /// Check if cache is empty and reload if needed
     pub async fn refresh_if_cache_empty(&mut self) -> Result<()> {
         let cache_key = self.get_cache_key();
-        
+
         // Check if cache has data for current tab
         if self.cache.get(&cache_key).await.is_none() {
             // Cache is empty/missing for this tab, reload
             self.refresh().await?;
         }
-        
+
         Ok(())
     }
 
@@ -383,10 +379,10 @@ impl App {
     /// This is called during initial launch to load all tab data in parallel
     pub async fn preload_all_tabs(&self) -> Result<()> {
         use futures::future::join_all;
-        
+
         let tabs = Tab::all();
         let mut futures = Vec::new();
-        
+
         for tab in &tabs {
             let config = self.config.clone();
             let cache = self.cache.clone();
@@ -394,7 +390,7 @@ impl App {
                 Tab::Crew => config.crew_members.clone(),
                 _ => vec![],
             };
-            
+
             // Get cache key for this tab
             let tab_type = match tab {
                 Tab::PendingReviews => "pending_reviews",
@@ -403,7 +399,7 @@ impl App {
                 Tab::Statistics => "statistics",
                 Tab::MonitorLive => "monitor_live",
             };
-            
+
             let cache_key = CacheKeyBuilder::new()
                 .org(&config.github_org)
                 .repos(&config.github_repos)
@@ -415,12 +411,12 @@ impl App {
                 .crew_members(&crew_members)
                 .max_age_days(config.max_pr_age_days)
                 .build();
-            
+
             // Check if already cached
             if cache.get(&cache_key).await.is_some() {
                 continue; // Skip if already cached
             }
-            
+
             // Spawn a future to load this tab's data
             let future = async move {
                 match tab {
@@ -434,9 +430,10 @@ impl App {
                             false,
                             false,
                             &config.exclude_prefix,
-                            &vec![], // No crew filter for pending reviews
+                            &[], // No crew filter for pending reviews
                             config.max_pr_age_days,
-                        ).await
+                        )
+                        .await
                     }
                     Tab::MyPullRequests => {
                         fetch_my_open_prs(
@@ -447,7 +444,8 @@ impl App {
                             true,
                             &config.exclude_prefix,
                             config.max_pr_age_days,
-                        ).await
+                        )
+                        .await
                     }
                     Tab::Crew => {
                         fetch_pending_reviews(
@@ -461,7 +459,8 @@ impl App {
                             &config.exclude_prefix,
                             &config.crew_members,
                             config.max_pr_age_days,
-                        ).await
+                        )
+                        .await
                     }
                     Tab::Statistics => {
                         fetch_pending_reviews(
@@ -473,9 +472,10 @@ impl App {
                             false,
                             false,
                             &config.exclude_prefix,
-                            &vec![],
+                            &[],
                             config.max_pr_age_days,
-                        ).await
+                        )
+                        .await
                     }
                     Tab::MonitorLive => {
                         fetch_pending_reviews(
@@ -487,17 +487,18 @@ impl App {
                             false,
                             false,
                             &config.exclude_prefix,
-                            &vec![],
+                            &[],
                             config.max_pr_age_days,
-                        ).await
+                        )
+                        .await
                     }
                 }
             };
-            
+
             // Store the future along with its cache key
             futures.push((cache_key, future));
         }
-        
+
         // Execute all futures concurrently
         let results = join_all(futures.into_iter().map(|(cache_key, future)| async move {
             match future.await {
@@ -507,15 +508,14 @@ impl App {
                     None
                 }
             }
-        })).await;
-        
+        }))
+        .await;
+
         // Cache all successful results
-        for result in results {
-            if let Some((cache_key, reviews)) = result {
-                self.cache.set(cache_key, reviews).await;
-            }
+        for (cache_key, reviews) in results.into_iter().flatten() {
+            self.cache.set(cache_key, reviews).await;
         }
-        
+
         Ok(())
     }
 
@@ -525,21 +525,26 @@ impl App {
             self.filtered_indices = (0..self.reviews.len()).collect();
         } else {
             let filter = self.filter.to_lowercase();
-            self.filtered_indices = self.reviews
+            self.filtered_indices = self
+                .reviews
                 .iter()
                 .enumerate()
                 .filter(|(_, pr)| {
-                    pr.pr_title.to_lowercase().contains(&filter) ||
-                    pr.pr_author.to_lowercase().contains(&filter) ||
-                    pr.repo.to_lowercase().contains(&filter) ||
-                    pr.pr_number.to_string().contains(&filter)
+                    pr.pr_title.to_lowercase().contains(&filter)
+                        || pr.pr_author.to_lowercase().contains(&filter)
+                        || pr.repo.to_lowercase().contains(&filter)
+                        || pr.pr_number.to_string().contains(&filter)
                 })
                 .map(|(idx, _)| idx)
                 .collect();
         }
-        
+
         // Reset filtered position
-        if let Some(pos) = self.filtered_indices.iter().position(|&idx| idx == self.selected_pr) {
+        if let Some(pos) = self
+            .filtered_indices
+            .iter()
+            .position(|&idx| idx == self.selected_pr)
+        {
             self.filtered_position = pos;
         } else if !self.filtered_indices.is_empty() {
             self.filtered_position = 0;
@@ -551,19 +556,22 @@ impl App {
 
     /// Get filtered reviews based on current filter string
     pub fn filtered_reviews(&self) -> Vec<&PendingReview> {
-        self.filtered_indices.iter().map(|&idx| &self.reviews[idx]).collect()
+        self.filtered_indices
+            .iter()
+            .map(|&idx| &self.reviews[idx])
+            .collect()
     }
 
     /// Get the next refresh duration
     pub fn next_refresh_duration(&self) -> Duration {
         let interval = Duration::from_secs(self.refresh_interval);
-        
+
         if let Some(last) = self.last_refresh {
             let elapsed = last.signed_duration_since(chrono::Utc::now());
             let remaining = interval.saturating_sub(elapsed.to_std().unwrap_or(Duration::ZERO));
             return remaining;
         }
-        
+
         Duration::ZERO
     }
 
@@ -594,7 +602,9 @@ impl App {
 
     /// Switch to next tab
     pub fn next_tab(&mut self) {
-        let current_index = self.tabs.iter()
+        let current_index = self
+            .tabs
+            .iter()
             .position(|t| *t == self.active_tab)
             .unwrap_or(0);
         self.set_active_tab((current_index + 1) % self.tabs.len());
@@ -602,7 +612,9 @@ impl App {
 
     /// Switch to previous tab
     pub fn prev_tab(&mut self) {
-        let current_index = self.tabs.iter()
+        let current_index = self
+            .tabs
+            .iter()
             .position(|t| *t == self.active_tab)
             .unwrap_or(0);
         let new_index = if current_index == 0 {

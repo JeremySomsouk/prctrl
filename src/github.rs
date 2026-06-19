@@ -384,7 +384,7 @@ pub async fn fetch_my_open_prs(
             }
 
             let author = pr.user.as_ref().map(|u| u.login.as_str()).unwrap_or("");
-            
+
             // Filter by max age if configured
             if let Some(max_age) = max_age_days {
                 let pr_created = match pr.created_at {
@@ -400,7 +400,7 @@ pub async fn fetch_my_open_prs(
                     continue;
                 }
             }
-            
+
             if author != username {
                 continue;
             }
@@ -835,7 +835,7 @@ pub async fn fetch_my_review_activity(
     }
 
     // Sort by most recent first
-    all_reviews.sort_by(|a, b| b.reviewed_at.cmp(&a.reviewed_at));
+    all_reviews.sort_by_key(|b| std::cmp::Reverse(b.reviewed_at));
     Ok(all_reviews)
 }
 
@@ -864,7 +864,7 @@ pub async fn fetch_merge_conflict_status(
     let results_vec: Vec<Result<_, _>> = join_all(futures).await;
 
     let mut results = Vec::new();
-    for ((repo, pr_number), result) in fetch_tasks.into_iter().zip(results_vec.into_iter()) {
+    for ((repo, pr_number), result) in fetch_tasks.into_iter().zip(results_vec) {
         match result {
             Ok(pr) => {
                 let has_conflicts = pr.mergeable == Some(false);
@@ -979,7 +979,7 @@ pub async fn fetch_ci_status(
 
     // Collect successes, log failures
     let mut ci_statuses = Vec::new();
-    for (review, result) in reviews.iter().zip(results.into_iter()) {
+    for (review, result) in reviews.iter().zip(results) {
         match result {
             Ok(status) => ci_statuses.push(status),
             Err(e) => {
@@ -1171,7 +1171,7 @@ pub async fn fetch_mentions(
     // Build a map of (repo, pr_number) -> author
     let mut author_map: std::collections::HashMap<(String, u64), String> =
         std::collections::HashMap::new();
-    for (mention, result) in mentions.iter().zip(detail_results.into_iter()) {
+    for (mention, result) in mentions.iter().zip(detail_results) {
         if mention.pr_number > 0 {
             if let Ok(detail) = result {
                 let author = detail
@@ -1196,7 +1196,7 @@ pub async fn fetch_mentions(
     mentions.truncate(limit);
 
     // Sort by most recently updated
-    mentions.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+    mentions.sort_by_key(|b| std::cmp::Reverse(b.updated_at));
 
     Ok(mentions)
 }

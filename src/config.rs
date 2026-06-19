@@ -196,7 +196,11 @@ impl Config {
             std::env::var("PRCTRL_MAX_PR_AGE_DAYS")
                 .ok()
                 .and_then(|s| s.parse().ok())
-                .or_else(|| std::env::var("MAX_PR_AGE_DAYS").ok().and_then(|s| s.parse().ok()))
+                .or_else(|| {
+                    std::env::var("MAX_PR_AGE_DAYS")
+                        .ok()
+                        .and_then(|s| s.parse().ok())
+                })
         })
         .or(Some(60)); // Default to 60 days
 

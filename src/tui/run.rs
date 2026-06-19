@@ -5,12 +5,13 @@ use crate::tui::ui::Ui;
 use anyhow::{Context, Result};
 use crossterm::event::Event as CrosstermEvent;
 use crossterm::execute;
-use crossterm::terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen};
+use crossterm::terminal::{
+    disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
+};
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 use std::io;
 use std::time::Duration;
-
 
 /// Run the TUI application
 pub async fn run_tui(config: Config, refresh_interval: u64) -> Result<()> {
@@ -18,24 +19,24 @@ pub async fn run_tui(config: Config, refresh_interval: u64) -> Result<()> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen)?;
-    
+
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
-    
+
     // Create app state
     let mut app = App::new(config, refresh_interval)
         .await
         .context("Failed to initialize TUI app")?;
-    
+
     // Draw the UI once to show loading screen before fetching
     terminal.draw(|frame| Ui::draw(frame, &mut app))?;
-    
+
     // First, load the current tab (PendingReviews) synchronously
     app.refresh().await?;
-    
+
     // Redraw after initial load
     terminal.draw(|frame| Ui::draw(frame, &mut app))?;
-    
+
     // Then, preload all other tabs asynchronously in the background
     // This will populate the cache so subsequent tab switches are instant
     let cache = app.cache.clone();
@@ -47,7 +48,7 @@ pub async fn run_tui(config: Config, refresh_interval: u64) -> Result<()> {
         let _ = temp_app.preload_all_tabs().await;
         Some(())
     });
-    
+
     // Main event loop
     loop {
         // Calculate timeout based on next refresh
@@ -57,7 +58,7 @@ pub async fn run_tui(config: Config, refresh_interval: u64) -> Result<()> {
         } else {
             refresh_duration.min(Duration::from_millis(500))
         };
-        
+
         // Poll for events with timeout
         if crossterm::event::poll(timeout).unwrap_or(false) {
             // Event available - read it
@@ -76,12 +77,12 @@ pub async fn run_tui(config: Config, refresh_interval: u64) -> Result<()> {
             }
         }
     }
-    
+
     // Cleanup terminal
     disable_raw_mode()?;
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
     terminal.show_cursor()?;
-    
+
     Ok(())
 }
 
@@ -97,24 +98,20 @@ async fn handle_event(app: &mut App, event: Event) -> Result<bool> {
             app.error = Some("An error occurred".to_string());
             Ok(true)
         }
-        Event::Quit => {
-            Ok(false)
-        }
+        Event::Quit => Ok(false),
     }
 }
 
 /// Handle keyboard input
 async fn handle_key_event(app: &mut App, key: crossterm::event::KeyEvent) -> Result<bool> {
     use crossterm::event::{KeyCode, KeyModifiers};
-    
+
     // Clear info/error popup on any key press (unless we're in a special mode)
-    if app.info.is_some() || app.error.is_some() {
-        if !app.show_action_menu && !app.show_help {
-            app.info = None;
-            app.error = None;
-        }
+    if (app.info.is_some() || app.error.is_some()) && !app.show_action_menu && !app.show_help {
+        app.info = None;
+        app.error = None;
     }
-    
+
     match key.code {
         // Quit
         KeyCode::Char('q') | KeyCode::Char('Q') => {
@@ -137,7 +134,7 @@ async fn handle_key_event(app: &mut App, key: crossterm::event::KeyEvent) -> Res
                 return Ok(false);
             }
         }
-        
+
         // Navigation
         KeyCode::Down | KeyCode::Char('j') => {
             if app.show_action_menu {
@@ -178,7 +175,7 @@ async fn handle_key_event(app: &mut App, key: crossterm::event::KeyEvent) -> Res
         KeyCode::End => {
             app.selected_pr = app.reviews.len().saturating_sub(1);
         }
-        
+
         // Tab switching
         KeyCode::Tab => {
             if key.modifiers.contains(KeyModifiers::SHIFT) {
@@ -202,7 +199,7 @@ async fn handle_key_event(app: &mut App, key: crossterm::event::KeyEvent) -> Res
             // Clear loading indicator
             app.loading = false;
         }
-        
+
         // Filter
         KeyCode::Char('/') => {
             // Start filter mode
@@ -214,7 +211,7 @@ async fn handle_key_event(app: &mut App, key: crossterm::event::KeyEvent) -> Res
             app.filter.clear();
             app.update_filtered_indices();
         }
-        
+
         // Force refresh (bypasses cache) - must come before regular refresh
         KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             app.force_refresh().await?;
@@ -223,12 +220,12 @@ async fn handle_key_event(app: &mut App, key: crossterm::event::KeyEvent) -> Res
         KeyCode::Char('r') | KeyCode::Char('R') => {
             app.refresh().await?;
         }
-        
+
         // Help
         KeyCode::Char('?') => {
             app.show_help = !app.show_help;
         }
-        
+
         // Filter input (must come after specific char patterns)
         KeyCode::Char(c) => {
             if !app.filter.is_empty() {
@@ -255,7 +252,7 @@ async fn handle_key_event(app: &mut App, key: crossterm::event::KeyEvent) -> Res
             app.filter.clear();
             app.update_filtered_indices();
         }
-        
+
         // Select PR or action
         KeyCode::Enter => {
             if app.show_action_menu {
@@ -267,11 +264,11 @@ async fn handle_key_event(app: &mut App, key: crossterm::event::KeyEvent) -> Res
                 app.selected_action = 0;
             }
         }
-        
+
         // Ignore other keys
         _ => {}
     }
-    
+
     Ok(true)
 }
 
@@ -280,11 +277,14 @@ async fn handle_action(app: &mut App) -> Result<()> {
     use crate::tui::app::PrAction;
 
     let actions = PrAction::all();
-    let selected = actions.get(app.selected_action).copied().unwrap_or(PrAction::Cancel);
-    
+    let selected = actions
+        .get(app.selected_action)
+        .copied()
+        .unwrap_or(PrAction::Cancel);
+
     // Close the action menu
     app.show_action_menu = false;
-    
+
     match selected {
         PrAction::OpenInBrowser => {
             if let Some(pr) = app.selected_pr_item() {
@@ -323,10 +323,7 @@ async fn handle_action(app: &mut App) -> Result<()> {
         PrAction::Approve => {
             if let Some(pr) = app.selected_pr_item() {
                 // Would approve PR in a real implementation
-                app.info = Some(format!(
-                    "Approved PR #{} - {}",
-                    pr.pr_number, pr.pr_title
-                ));
+                app.info = Some(format!("Approved PR #{} - {}", pr.pr_number, pr.pr_title));
             }
         }
         PrAction::RequestChanges => {
@@ -342,6 +339,6 @@ async fn handle_action(app: &mut App) -> Result<()> {
             // Already closed the menu, nothing to do
         }
     }
-    
+
     Ok(())
 }

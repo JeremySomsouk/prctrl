@@ -1176,7 +1176,7 @@ pub async fn dispatch(ctx: CommandContext) -> anyhow::Result<()> {
                     if !repo_counts.is_empty() {
                         println!("\n  By repository:");
                         let mut repo_vec: Vec<_> = repo_counts.iter().collect();
-                        repo_vec.sort_by(|a, b| b.1.cmp(a.1));
+                        repo_vec.sort_by_key(|b| std::cmp::Reverse(b.1));
                         for (repo, count) in repo_vec {
                             println!("    {}: {}", repo, count);
                         }
@@ -1186,7 +1186,7 @@ pub async fn dispatch(ctx: CommandContext) -> anyhow::Result<()> {
                     if !author_counts.is_empty() {
                         println!("\n  By author:");
                         let mut author_vec: Vec<_> = author_counts.iter().collect();
-                        author_vec.sort_by(|a, b| b.1.cmp(a.1));
+                        author_vec.sort_by_key(|b| std::cmp::Reverse(b.1));
                         for (author, count) in author_vec {
                             let bar = "█".repeat(*count).cyan();
                             println!("    {}  {}", author.bold(), bar);
@@ -1354,7 +1354,7 @@ pub async fn dispatch(ctx: CommandContext) -> anyhow::Result<()> {
                 if !team_counts.is_empty() {
                     println!("\n  By author:");
                     let mut sorted: Vec<_> = team_counts.iter().collect();
-                    sorted.sort_by(|a, b| b.1.cmp(a.1)); // descending by count
+                    sorted.sort_by_key(|b| std::cmp::Reverse(b.1)); // descending by count
                     for (author, count) in sorted {
                         let bar = "█".repeat(*count).cyan();
                         println!("    {}  {}", author.bold(), bar);
@@ -1367,7 +1367,7 @@ pub async fn dispatch(ctx: CommandContext) -> anyhow::Result<()> {
 
                 println!("\n  By repository:");
                 let mut repo_sorted: Vec<_> = repo_counts.iter().collect();
-                repo_sorted.sort_by(|a, b| b.1.cmp(a.1));
+                repo_sorted.sort_by_key(|b| std::cmp::Reverse(b.1));
                 for (repo, count) in repo_sorted {
                     println!("    {}: {}", repo, count);
                 }
@@ -2562,10 +2562,8 @@ pub async fn dispatch(ctx: CommandContext) -> anyhow::Result<()> {
                     futures::future::join_all(futures).await;
                 let total_prs = prs_from_numbers.len();
 
-                for (i, (review, timeline_result)) in prs_from_numbers
-                    .iter()
-                    .zip(timeline_results)
-                    .enumerate()
+                for (i, (review, timeline_result)) in
+                    prs_from_numbers.iter().zip(timeline_results).enumerate()
                 {
                     let timeline = match timeline_result {
                         Ok(t) => t,
@@ -2656,10 +2654,8 @@ pub async fn dispatch(ctx: CommandContext) -> anyhow::Result<()> {
                         futures::future::join_all(futures).await;
                     let total_prs = filtered.len();
 
-                    for (i, (review, timeline_result)) in filtered
-                        .iter()
-                        .zip(timeline_results)
-                        .enumerate()
+                    for (i, (review, timeline_result)) in
+                        filtered.iter().zip(timeline_results).enumerate()
                     {
                         let timeline = match timeline_result {
                             Ok(t) => t,
@@ -2733,9 +2729,7 @@ pub async fn dispatch(ctx: CommandContext) -> anyhow::Result<()> {
                 futures::future::join_all(futures).await;
             let total_prs = prs.len();
 
-            for (i, (review, timeline_result)) in
-                prs.iter().zip(timeline_results).enumerate()
-            {
+            for (i, (review, timeline_result)) in prs.iter().zip(timeline_results).enumerate() {
                 let timeline = match timeline_result {
                     Ok(t) => t,
                     Err(e) => {
@@ -4906,7 +4900,7 @@ pub async fn dispatch(ctx: CommandContext) -> anyhow::Result<()> {
                 .collect();
 
             // Always sort descending (highest priority/age/size first)
-            scored.sort_by(|a, b| b.1.cmp(&a.1));
+            scored.sort_by_key(|b| std::cmp::Reverse(b.1));
 
             let sorted: Vec<_> = scored.into_iter().map(|(r, _)| r).collect();
 
@@ -5427,7 +5421,7 @@ pub async fn dispatch(ctx: CommandContext) -> anyhow::Result<()> {
                         }
                         println!("\n📊 Label Frequency:");
                         let mut sorted: Vec<_> = label_counts.iter().collect();
-                        sorted.sort_by(|a, b| b.1 .1.cmp(&a.1 .1));
+                        sorted.sort_by_key(|b| std::cmp::Reverse(b.1 .1));
                         for (name, (color, count)) in sorted.iter().take(10) {
                             let bar = "█".repeat(*count).cyan();
                             println!("  {}  {}  {}", colorize_label(name, color), bar, count);
@@ -7040,12 +7034,12 @@ pub async fn dispatch(ctx: CommandContext) -> anyhow::Result<()> {
 
             // Top repos
             let mut top_repos: Vec<_> = by_repo.iter().collect();
-            top_repos.sort_by(|a, b| b.1.cmp(a.1));
+            top_repos.sort_by_key(|b| std::cmp::Reverse(b.1));
             let top_repos: Vec<_> = top_repos.into_iter().take(5).collect();
 
             // Top authors
             let mut top_authors: Vec<_> = by_author.iter().collect();
-            top_authors.sort_by(|a, b| b.1.cmp(a.1));
+            top_authors.sort_by_key(|b| std::cmp::Reverse(b.1));
             let top_authors: Vec<_> = top_authors.into_iter().take(5).collect();
 
             // Build age bar (visual breakdown)
@@ -7203,7 +7197,7 @@ pub async fn dispatch(ctx: CommandContext) -> anyhow::Result<()> {
                             (r, score)
                         })
                         .collect();
-                    scored.sort_by(|a, b| b.1.cmp(&a.1));
+                    scored.sort_by_key(|b| std::cmp::Reverse(b.1));
 
                     if let Some((most_urgent, top_score)) = scored.first() {
                         let age_days = (now - most_urgent.created_at).num_days();
@@ -9336,7 +9330,7 @@ pub async fn dispatch(ctx: CommandContext) -> anyhow::Result<()> {
             }
 
             // Sort by estimated time (longest first for planning)
-            estimates.sort_by(|a, b| b.estimated_minutes.cmp(&a.estimated_minutes));
+            estimates.sort_by_key(|b| std::cmp::Reverse(b.estimated_minutes));
 
             if json {
                 println!("{}", serde_json::to_string_pretty(&estimates)?);
@@ -9827,7 +9821,7 @@ pub async fn dispatch(ctx: CommandContext) -> anyhow::Result<()> {
                 if !processed_by_author.is_empty() {
                     println!("     By author:");
                     let mut sorted: Vec<_> = processed_by_author.iter().collect();
-                    sorted.sort_by(|a, b| b.1.cmp(a.1));
+                    sorted.sort_by_key(|b| std::cmp::Reverse(b.1));
                     for (author, count) in sorted.iter().take(5) {
                         println!("       {}: {}", author.cyan(), count);
                     }
@@ -9835,7 +9829,7 @@ pub async fn dispatch(ctx: CommandContext) -> anyhow::Result<()> {
                 if !processed_by_repo.is_empty() {
                     println!("     By repository:");
                     let mut sorted: Vec<_> = processed_by_repo.iter().collect();
-                    sorted.sort_by(|a, b| b.1.cmp(a.1));
+                    sorted.sort_by_key(|b| std::cmp::Reverse(b.1));
                     for (repo, count) in sorted.iter().take(5) {
                         println!("       {}: {}", repo, count);
                     }
@@ -9895,7 +9889,7 @@ pub async fn dispatch(ctx: CommandContext) -> anyhow::Result<()> {
 
                 if !recent_reviews.is_empty() {
                     println!("  🕐 Recent Activity (last {} days):", days);
-                    recent_reviews.sort_by(|a, b| b.1.cmp(&a.1));
+                    recent_reviews.sort_by_key(|b| std::cmp::Reverse(b.1));
                     for (title, date, _) in recent_reviews.iter().take(5) {
                         let days_ago = (Utc::now() - *date).num_days();
                         let when = if days_ago == 0 {
@@ -10109,7 +10103,7 @@ pub async fn dispatch(ctx: CommandContext) -> anyhow::Result<()> {
                             }
                             println!("\n  📁 By repository:");
                             let mut sorted: Vec<_> = by_repo.iter().collect();
-                            sorted.sort_by(|a, b| b.1.cmp(a.1));
+                            sorted.sort_by_key(|b| std::cmp::Reverse(b.1));
                             for (repo, count) in sorted.iter().take(5) {
                                 println!("    {}: {}", repo, count);
                             }
@@ -10579,11 +10573,11 @@ pub async fn dispatch(ctx: CommandContext) -> anyhow::Result<()> {
 
             // ── Top authors ──
             let mut top_authors: Vec<(String, u32)> = by_author.into_iter().collect();
-            top_authors.sort_by(|a, b| b.1.cmp(&a.1));
+            top_authors.sort_by_key(|b| std::cmp::Reverse(b.1));
 
             // ── Top repos ──
             let mut top_repos: Vec<(String, u32)> = by_repo.into_iter().collect();
-            top_repos.sort_by(|a, b| b.1.cmp(&a.1));
+            top_repos.sort_by_key(|b| std::cmp::Reverse(b.1));
 
             // ── Daily chart (last 14 days) ──
             let mut chart_days: Vec<(String, u32)> = vec![];
@@ -10732,7 +10726,7 @@ pub async fn dispatch(ctx: CommandContext) -> anyhow::Result<()> {
                 if priority {
                     use crate::logger::priority_stars;
                     let mut sorted_by_priority = reviews_data.clone();
-                    sorted_by_priority.sort_by(|a, b| b.priority_score.cmp(&a.priority_score));
+                    sorted_by_priority.sort_by_key(|b| std::cmp::Reverse(b.priority_score));
 
                     println!("  ⭐ Top PRs by Priority");
                     for review in sorted_by_priority.iter().take(10) {
@@ -11746,7 +11740,7 @@ pub async fn dispatch(ctx: CommandContext) -> anyhow::Result<()> {
                 .collect();
 
             // Sort by attention score descending
-            attention_list.sort_by(|a, b| b.attention_score.cmp(&a.attention_score));
+            attention_list.sort_by_key(|b| std::cmp::Reverse(b.attention_score));
 
             // Filter by threshold
             let filtered: Vec<&AttentionPR> = attention_list
@@ -13828,9 +13822,7 @@ pub async fn dispatch(ctx: CommandContext) -> anyhow::Result<()> {
 
             let mut ready_prs = Vec::new();
 
-            for ((repo_name, pr_number), result) in
-                fetch_tasks.iter().zip(detail_results)
-            {
+            for ((repo_name, pr_number), result) in fetch_tasks.iter().zip(detail_results) {
                 let review = match review_lookup.get(&(repo_name.clone(), *pr_number)) {
                     Some(r) => r,
                     None => continue,
@@ -14099,11 +14091,7 @@ pub async fn dispatch(ctx: CommandContext) -> anyhow::Result<()> {
             // Build blocked_prs from parallel results
             let mut blocked_prs: Vec<BlockedPr> = Vec::new();
 
-            for (idx, (review, pr_result)) in filtered_reviews
-                .iter()
-                .zip(pr_results)
-                .enumerate()
-            {
+            for (idx, (review, pr_result)) in filtered_reviews.iter().zip(pr_results).enumerate() {
                 let ci_status = ci_map
                     .get(&idx)
                     .cloned()
@@ -14837,14 +14825,14 @@ pub async fn dispatch(ctx: CommandContext) -> anyhow::Result<()> {
                     println!("\n  💻 Languages:");
                     print!("    PR #{}: ", num1);
                     let mut langs: Vec<_> = pr_details_1.languages.iter().collect();
-                    langs.sort_by(|a, b| b.1.cmp(a.1));
+                    langs.sort_by_key(|b| std::cmp::Reverse(b.1));
                     for (lang, count) in langs.iter().take(5) {
                         print!("{} ({}), ", lang, count);
                     }
                     println!();
                     print!("    PR #{}: ", num2);
                     let mut langs: Vec<_> = pr_details_2.languages.iter().collect();
-                    langs.sort_by(|a, b| b.1.cmp(a.1));
+                    langs.sort_by_key(|b| std::cmp::Reverse(b.1));
                     for (lang, count) in langs.iter().take(5) {
                         print!("{} ({}), ", lang, count);
                     }
