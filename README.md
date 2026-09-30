@@ -1,3 +1,5 @@
+![PRCtrl — Pull requests. Under control.](assets/prctrl-banner.png)
+
 # PRCtrl
 
 > **Terminal-native GitHub PR management. Stay on top of code reviews without leaving your terminal.**
