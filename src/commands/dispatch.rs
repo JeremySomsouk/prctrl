@@ -7832,7 +7832,7 @@ pub async fn dispatch(ctx: CommandContext) -> anyhow::Result<()> {
                                 println!(
                                     "\n✅ Extended {} PR(s) until {} ({} days)",
                                     extended_count.to_string().green().bold(),
-                                    &new_snooze_until[..10].cyan(),
+                                    new_snooze_until[..10].cyan(),
                                     duration_days
                                 );
                             }
@@ -7884,7 +7884,7 @@ pub async fn dispatch(ctx: CommandContext) -> anyhow::Result<()> {
                                 println!(
                                     "\n✅ Extended {} PR(s) until {} ({} days)",
                                     extended_count.to_string().green().bold(),
-                                    &new_snooze_until[..10].cyan(),
+                                    new_snooze_until[..10].cyan(),
                                     duration_days
                                 );
                             }
@@ -7981,7 +7981,7 @@ pub async fn dispatch(ctx: CommandContext) -> anyhow::Result<()> {
                                     println!(
                                         "\n✅ Extended {} PR(s) until {} ({} days)",
                                         indices_count.to_string().green().bold(),
-                                        &new_snooze_until[..10].cyan(),
+                                        new_snooze_until[..10].cyan(),
                                         duration_days
                                     );
                                 }
@@ -8782,8 +8782,8 @@ pub async fn dispatch(ctx: CommandContext) -> anyhow::Result<()> {
                             if new_commit {
                                 println!(
                                     "      Commit: {} → {}",
-                                    &pr.last_commit_sha[..7.min(pr.last_commit_sha.len())].yellow(),
-                                    &current_commit[..7.min(current_commit.len())].green()
+                                    pr.last_commit_sha[..7.min(pr.last_commit_sha.len())].yellow(),
+                                    current_commit[..7.min(current_commit.len())].green()
                                 );
                             }
                             if ci_changed {
