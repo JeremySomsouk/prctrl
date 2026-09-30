@@ -13,76 +13,79 @@ use ratatui::Terminal;
 use std::io;
 use std::time::Duration;
 
-/// Run the TUI application
+/// Restore the terminal even if drawing, input or a load fails.
+struct TerminalGuard;
+
+impl Drop for TerminalGuard {
+    fn drop(&mut self) {
+        let _ = disable_raw_mode();
+        let _ = execute!(io::stdout(), LeaveAlternateScreen, crossterm::cursor::Show);
+    }
+}
+
+/// Run keyboard input, load completions and animation on independent event sources.
 pub async fn run_tui(config: Config, refresh_interval: u64) -> Result<()> {
-    // Initialize terminal - MUST be done first
+    use crossterm::event::{EventStream, KeyEventKind};
+    use futures::StreamExt;
+
     enable_raw_mode()?;
+    let _guard = TerminalGuard;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen)?;
-
-    let backend = CrosstermBackend::new(stdout);
-    let mut terminal = Terminal::new(backend)?;
-
-    // Create app state
+    let mut terminal = Terminal::new(CrosstermBackend::new(stdout))?;
     let mut app = App::new(config, refresh_interval)
         .await
         .context("Failed to initialize TUI app")?;
-
-    // Draw the UI once to show loading screen before fetching
-    terminal.draw(|frame| Ui::draw(frame, &mut app))?;
-
-    // First, load the current tab (PendingReviews) synchronously
     app.refresh().await?;
+    app.preload_all_tabs().await?;
 
-    // Redraw after initial load
-    terminal.draw(|frame| Ui::draw(frame, &mut app))?;
-
-    // Then, preload all other tabs asynchronously in the background
-    // This will populate the cache so subsequent tab switches are instant
-    let cache = app.cache.clone();
-    let preload_config = app.config.clone();
-    let _preload_task = tokio::spawn(async move {
-        // Create a temporary app just for preloading
-        let mut temp_app = App::new(preload_config, 0).await.ok()?;
-        temp_app.cache = cache;
-        let _ = temp_app.preload_all_tabs().await;
-        Some(())
-    });
-
-    // Main event loop
+    let mut input = EventStream::new();
+    let mut tick = tokio::time::interval(Duration::from_millis(100));
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut dirty = true;
+    let mut last_second = std::time::Instant::now();
     loop {
-        // Calculate timeout based on next refresh
-        let refresh_duration = app.next_refresh_duration();
-        let timeout = if refresh_duration.is_zero() {
-            Duration::from_millis(100)
-        } else {
-            refresh_duration.min(Duration::from_millis(500))
-        };
-
-        // Poll for events with timeout
-        if crossterm::event::poll(timeout).unwrap_or(false) {
-            // Event available - read it
-            if let Ok(CrosstermEvent::Key(key)) = crossterm::event::read() {
-                if !handle_event(&mut app, Event::Key(key)).await? {
-                    break;
+        if dirty {
+            terminal.draw(|frame| Ui::draw(frame, &mut app))?;
+            dirty = false;
+        }
+        tokio::select! {
+            event = input.next() => {
+                match event {
+                    Some(Ok(CrosstermEvent::Key(key))) if key.kind != KeyEventKind::Release => {
+                        if !handle_event(&mut app, Event::Key(key)).await? { break; }
+                        dirty = true;
+                    }
+                    Some(Ok(CrosstermEvent::Resize(..))) => dirty = true,
+                    Some(Err(error)) => return Err(error.into()),
+                    None => break,
+                    _ => {}
                 }
-                // Redraw after handling key event
-                terminal.draw(|frame| Ui::draw(frame, &mut app))?;
             }
-        } else {
-            // Timeout - check if we should refresh
-            if app.next_refresh_duration().is_zero() {
-                app.refresh().await?;
-                terminal.draw(|frame| Ui::draw(frame, &mut app))?;
+            result = app.loads.join_next(), if !app.loads.is_empty() => {
+                match result {
+                    Some(Ok((tab, data))) => app.finish_load(tab, data).await,
+                    Some(Err(error)) => return Err(error.into()),
+                    None => {}
+                }
+                dirty = true;
+            }
+            _ = tick.tick() => {
+                if !app.loading && app.next_refresh_duration().is_zero() {
+                    app.force_refresh().await?;
+                    dirty = true;
+                }
+                if app.loading {
+                    app.spinner_frame = app.spinner_frame.wrapping_add(1);
+                    dirty = true;
+                }
+                if last_second.elapsed() >= Duration::from_secs(1) {
+                    last_second = std::time::Instant::now();
+                    dirty = true;
+                }
             }
         }
     }
-
-    // Cleanup terminal
-    disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
-    terminal.show_cursor()?;
-
     Ok(())
 }
 
@@ -183,21 +186,11 @@ async fn handle_key_event(app: &mut App, key: crossterm::event::KeyEvent) -> Res
             } else {
                 app.next_tab();
             }
-            // Set loading state before refreshing
-            app.loading = true;
-            // Check cache and refresh if needed for the new tab
             app.refresh().await?;
-            // Clear loading indicator
-            app.loading = false;
         }
         KeyCode::BackTab => {
             app.prev_tab();
-            // Set loading state before refreshing
-            app.loading = true;
-            // Check cache and refresh if needed for the new tab
             app.refresh().await?;
-            // Clear loading indicator
-            app.loading = false;
         }
 
         // Filter

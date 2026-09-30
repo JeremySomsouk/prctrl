@@ -3,7 +3,10 @@ use crate::config::Config;
 use crate::github::{fetch_my_open_prs, fetch_pending_reviews, PendingReview};
 use anyhow::Result;
 use chrono::DateTime;
-use std::time::Duration;
+use std::collections::HashSet;
+use std::future::Future;
+use std::time::{Duration, Instant};
+use tokio::task::JoinSet;
 
 /// Actions available for a selected PR
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -100,10 +103,13 @@ pub struct App {
     pub filtered_indices: Vec<usize>,
     /// Current position in filtered list
     pub filtered_position: usize,
+    pub(crate) loads: JoinSet<(Tab, Result<Vec<PendingReview>>)>,
+    pending: HashSet<Tab>,
+    last_attempt: Option<Instant>,
 }
 
 /// Represents a tab/command in the left sidebar
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Tab {
     /// List all pending reviews
     PendingReviews,
@@ -179,6 +185,9 @@ impl App {
             cache: PrCache::with_ttl(60), // 1 minute TTL
             filtered_indices: vec![],
             filtered_position: 0,
+            loads: JoinSet::new(),
+            pending: HashSet::new(),
+            last_attempt: None,
         })
     }
 
@@ -270,13 +279,13 @@ impl App {
     }
 
     /// Generate a cache key for the current tab and config
-    fn get_cache_key(&self) -> CacheKey {
-        let crew_members: Vec<String> = match self.active_tab {
+    fn cache_key_for(&self, tab: Tab) -> CacheKey {
+        let crew_members: Vec<String> = match tab {
             Tab::Crew => self.config.crew_members.clone(),
             _ => vec![],
         };
 
-        let tab_type = match self.active_tab {
+        let tab_type = match tab {
             Tab::PendingReviews => "pending_reviews",
             Tab::MyPullRequests => "my_prs",
             Tab::Crew => "crew",
@@ -297,225 +306,110 @@ impl App {
             .build()
     }
 
-    /// Refresh the data based on current tab
+    /// Schedule a load without awaiting the network in the input loop.
     pub async fn refresh(&mut self) -> Result<()> {
-        self.loading = true;
-        self.error = None;
-        self.info = None;
-
-        // Monitor Live tab always fetches fresh data (bypasses cache)
-        if self.active_tab != Tab::MonitorLive {
-            let cache_key = self.get_cache_key();
-
-            // Try to get from cache first
-            if let Some(cached_reviews) = self.cache.get(&cache_key).await {
-                self.reviews = cached_reviews;
-                self.loading = false;
-                self.last_refresh = Some(chrono::Utc::now());
-                self.selected_pr = self.selected_pr.min(self.reviews.len().saturating_sub(1));
-                self.update_filtered_indices();
-                return Ok(());
-            }
-        }
-
-        // For Crew tab, pass crew_members from config; for other tabs, pass empty vec
-        let crew_members: Vec<String> = match self.active_tab {
-            Tab::Crew => self.config.crew_members.clone(),
-            _ => vec![],
-        };
-
-        self.reviews =
-            Self::fetch_reviews_for_tab(&self.config, &self.active_tab, &crew_members).await?;
-
-        // Cache the results (except for Monitor Live tab)
-        if self.active_tab != Tab::MonitorLive {
-            let cache_key = self.get_cache_key();
-            self.cache.set(cache_key, self.reviews.clone()).await;
-        }
-
-        // Update filtered indices after reviews change
-        self.update_filtered_indices();
-
-        self.loading = false;
-        self.last_refresh = Some(chrono::Utc::now());
-        self.selected_pr = self.selected_pr.min(self.reviews.len().saturating_sub(1));
-
+        self.request_tab(self.active_tab, false).await;
         Ok(())
     }
 
-    /// Force refresh - clears cache for current tab and reloads
     pub async fn force_refresh(&mut self) -> Result<()> {
-        // Clear cache for current tab
-        let cache_key = self.get_cache_key();
-        self.cache.invalidate(&cache_key).await;
-
-        // Reload
-        self.refresh().await
-    }
-
-    /// Clear all cache and reload current tab
-    pub async fn clear_cache_and_refresh(&mut self) -> Result<()> {
-        // Clear all cache
-        self.cache.clear().await;
-
-        // Reload current tab
-        self.refresh().await
-    }
-
-    /// Check if cache is empty and reload if needed
-    pub async fn refresh_if_cache_empty(&mut self) -> Result<()> {
-        let cache_key = self.get_cache_key();
-
-        // Check if cache has data for current tab
-        if self.cache.get(&cache_key).await.is_none() {
-            // Cache is empty/missing for this tab, reload
-            self.refresh().await?;
-        }
-
+        self.request_tab(self.active_tab, true).await;
         Ok(())
     }
 
-    /// Preload all tabs asynchronously and populate the cache
-    /// This is called during initial launch to load all tab data in parallel
-    pub async fn preload_all_tabs(&self) -> Result<()> {
-        use futures::future::join_all;
-
-        let tabs = Tab::all();
-        let mut futures = Vec::new();
-
-        for tab in &tabs {
-            let config = self.config.clone();
-            let cache = self.cache.clone();
-            let crew_members = match tab {
-                Tab::Crew => config.crew_members.clone(),
-                _ => vec![],
-            };
-
-            // Get cache key for this tab
-            let tab_type = match tab {
-                Tab::PendingReviews => "pending_reviews",
-                Tab::MyPullRequests => "my_prs",
-                Tab::Crew => "crew",
-                Tab::Statistics => "statistics",
-                Tab::MonitorLive => "monitor_live",
-            };
-
-            let cache_key = CacheKeyBuilder::new()
-                .org(&config.github_org)
-                .repos(&config.github_repos)
-                .username(&config.github_username)
-                .tab_type(tab_type)
-                .include_mine(false)
-                .include_drafts(false)
-                .exclude_prefixes(&config.exclude_prefix)
-                .crew_members(&crew_members)
-                .max_age_days(config.max_pr_age_days)
-                .build();
-
-            // Check if already cached
-            if cache.get(&cache_key).await.is_some() {
-                continue; // Skip if already cached
-            }
-
-            // Spawn a future to load this tab's data
-            let future = async move {
-                match tab {
-                    Tab::PendingReviews => {
-                        fetch_pending_reviews(
-                            &config.github_token,
-                            &config.github_org,
-                            &config.github_repos,
-                            &config.github_username,
-                            &config.github_teams,
-                            false,
-                            false,
-                            &config.exclude_prefix,
-                            &[], // No crew filter for pending reviews
-                            config.max_pr_age_days,
-                        )
-                        .await
-                    }
-                    Tab::MyPullRequests => {
-                        fetch_my_open_prs(
-                            &config.github_token,
-                            &config.github_org,
-                            &config.github_repos,
-                            &config.github_username,
-                            true,
-                            &config.exclude_prefix,
-                            config.max_pr_age_days,
-                        )
-                        .await
-                    }
-                    Tab::Crew => {
-                        fetch_pending_reviews(
-                            &config.github_token,
-                            &config.github_org,
-                            &config.github_repos,
-                            &config.github_username,
-                            &config.github_teams,
-                            false,
-                            false,
-                            &config.exclude_prefix,
-                            &config.crew_members,
-                            config.max_pr_age_days,
-                        )
-                        .await
-                    }
-                    Tab::Statistics => {
-                        fetch_pending_reviews(
-                            &config.github_token,
-                            &config.github_org,
-                            &config.github_repos,
-                            &config.github_username,
-                            &config.github_teams,
-                            false,
-                            false,
-                            &config.exclude_prefix,
-                            &[],
-                            config.max_pr_age_days,
-                        )
-                        .await
-                    }
-                    Tab::MonitorLive => {
-                        fetch_pending_reviews(
-                            &config.github_token,
-                            &config.github_org,
-                            &config.github_repos,
-                            &config.github_username,
-                            &config.github_teams,
-                            false,
-                            false,
-                            &config.exclude_prefix,
-                            &[],
-                            config.max_pr_age_days,
-                        )
-                        .await
-                    }
-                }
-            };
-
-            // Store the future along with its cache key
-            futures.push((cache_key, future));
+    async fn request_tab(&mut self, tab: Tab, force: bool) {
+        if tab == self.active_tab {
+            self.error = None;
+            self.info = None;
         }
+        let key = self.cache_key_for(tab);
+        if !force && tab != Tab::MonitorLive {
+            if let Some(reviews) = self.cache.get(&key).await {
+                if tab == self.active_tab {
+                    self.set_reviews(reviews);
+                    self.loading = self.pending.contains(&tab);
+                    self.last_attempt = Some(Instant::now());
+                }
+                return;
+            }
+        }
+        if tab == self.active_tab {
+            self.loading = true;
+        }
+        if self.pending.contains(&tab) {
+            return;
+        }
+        let config = self.config.clone();
+        let crew = if tab == Tab::Crew {
+            config.crew_members.clone()
+        } else {
+            vec![]
+        };
+        self.start_load(tab, async move {
+            tokio::time::timeout(
+                Duration::from_secs(30),
+                Self::fetch_reviews_for_tab(&config, &tab, &crew),
+            )
+            .await
+            .map_err(|_| anyhow::anyhow!("GitHub load timed out. Press r to retry."))?
+        });
+    }
 
-        // Execute all futures concurrently
-        let results = join_all(futures.into_iter().map(|(cache_key, future)| async move {
-            match future.await {
-                Ok(reviews) => Some((cache_key, reviews)),
-                Err(e) => {
-                    eprintln!("Warning: Failed to preload tab: {}", e);
-                    None
+    fn start_load(
+        &mut self,
+        tab: Tab,
+        load: impl Future<Output = Result<Vec<PendingReview>>> + Send + 'static,
+    ) {
+        self.pending.insert(tab);
+        self.loads.spawn(async move { (tab, load.await) });
+    }
+
+    pub(crate) async fn finish_load(&mut self, tab: Tab, result: Result<Vec<PendingReview>>) {
+        self.pending.remove(&tab);
+        match result {
+            Ok(reviews) => {
+                self.cache
+                    .set(self.cache_key_for(tab), reviews.clone())
+                    .await;
+                if tab == self.active_tab {
+                    self.set_reviews(reviews);
+                    self.last_refresh = Some(chrono::Utc::now());
                 }
             }
-        }))
-        .await;
-
-        // Cache all successful results
-        for (cache_key, reviews) in results.into_iter().flatten() {
-            self.cache.set(cache_key, reviews).await;
+            Err(error) if tab == self.active_tab => self.error = Some(format!("{error:#}")),
+            Err(_) => {}
         }
+        if tab == self.active_tab {
+            self.loading = false;
+            self.last_attempt = Some(Instant::now());
+        }
+    }
 
+    fn set_reviews(&mut self, reviews: Vec<PendingReview>) {
+        let selected = self
+            .selected_pr_item()
+            .map(|pr| (pr.repo.clone(), pr.pr_number));
+        self.reviews = reviews;
+        self.selected_pr = selected
+            .and_then(|(repo, number)| {
+                self.reviews
+                    .iter()
+                    .position(|pr| pr.repo == repo && pr.pr_number == number)
+            })
+            .unwrap_or(0);
+        self.update_filtered_indices();
+    }
+
+    /// Each tab becomes usable as soon as its own load completes.
+    pub async fn preload_all_tabs(&mut self) -> Result<()> {
+        for tab in [
+            Tab::PendingReviews,
+            Tab::MyPullRequests,
+            Tab::Crew,
+            Tab::Statistics,
+        ] {
+            self.request_tab(tab, false).await;
+        }
         Ok(())
     }
 
@@ -564,15 +458,12 @@ impl App {
 
     /// Get the next refresh duration
     pub fn next_refresh_duration(&self) -> Duration {
-        let interval = Duration::from_secs(self.refresh_interval);
-
-        if let Some(last) = self.last_refresh {
-            let elapsed = last.signed_duration_since(chrono::Utc::now());
-            let remaining = interval.saturating_sub(elapsed.to_std().unwrap_or(Duration::ZERO));
-            return remaining;
+        if self.refresh_interval == 0 {
+            return Duration::MAX;
         }
-
-        Duration::ZERO
+        self.last_attempt
+            .map(|last| Duration::from_secs(self.refresh_interval).saturating_sub(last.elapsed()))
+            .unwrap_or(Duration::ZERO)
     }
 
     /// Select next PR in the list
@@ -593,10 +484,14 @@ impl App {
 
     /// Set the active tab by index
     pub fn set_active_tab(&mut self, index: usize) {
-        if index < self.tabs.len() {
-            self.active_tab = self.tabs[index].clone();
-            // Refresh data when switching tabs
-            // Note: In the actual TUI, we'd trigger a refresh here
+        if index < self.tabs.len() && self.active_tab != self.tabs[index] {
+            self.active_tab = self.tabs[index];
+            self.reviews.clear();
+            self.selected_pr = 0;
+            self.update_filtered_indices();
+            self.last_refresh = None;
+            self.last_attempt = None;
+            self.show_action_menu = false;
         }
     }
 
@@ -628,5 +523,106 @@ impl App {
     /// Get the currently selected PR
     pub fn selected_pr_item(&self) -> Option<&PendingReview> {
         self.reviews.get(self.selected_pr)
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod tests {
+    use super::*;
+
+    pub(crate) fn config() -> Config {
+        Config {
+            github_token: "test-token".into(),
+            github_username: "reviewer".into(),
+            github_org: "example".into(),
+            github_repos: vec![],
+            github_teams: vec![],
+            crew_members: vec!["teammate".into()],
+            anthropic_api_key: None,
+            exclude_prefix: vec![],
+            max_pr_age_days: Some(60),
+        }
+    }
+
+    pub(crate) fn review(number: u64) -> PendingReview {
+        PendingReview {
+            repo: "demo".into(),
+            pr_number: number,
+            pr_title: format!("Improve feature {number}"),
+            pr_author: "teammate".into(),
+            pr_url: format!("https://github.com/example/demo/pull/{number}"),
+            created_at: chrono::Utc::now(),
+            additions: 12,
+            deletions: 3,
+            draft: false,
+            branch: "feature".into(),
+        }
+    }
+
+    async fn complete(app: &mut App) {
+        let (tab, result) = app.loads.join_next().await.unwrap().unwrap();
+        app.finish_load(tab, result).await;
+    }
+
+    #[tokio::test]
+    async fn tab_changes_do_not_wait_for_slow_loads_or_apply_other_tabs() {
+        let mut app = App::new(config(), 30).await.unwrap();
+        let (send, receive) = tokio::sync::oneshot::channel();
+        app.start_load(Tab::PendingReviews, async move { Ok(receive.await?) });
+        app.set_active_tab(1);
+        app.refresh().await.unwrap();
+        assert_eq!(app.active_tab, Tab::MyPullRequests);
+        assert_eq!(app.pending.len(), 2);
+        complete(&mut app).await; // Empty My PRs finishes before pending reviews.
+        assert!(!app.loading);
+        send.send(vec![review(7)]).unwrap();
+        complete(&mut app).await;
+        assert!(app.reviews.is_empty());
+        app.set_active_tab(0);
+        app.refresh().await.unwrap();
+        assert_eq!(app.reviews[0].pr_number, 7);
+    }
+
+    #[tokio::test]
+    async fn refresh_deduplicates_running_loads() {
+        let mut app = App::new(config(), 30).await.unwrap();
+        app.start_load(Tab::PendingReviews, std::future::pending());
+        app.refresh().await.unwrap();
+        app.force_refresh().await.unwrap();
+        assert_eq!(app.loads.len(), 1);
+        assert!(app.loading);
+    }
+
+    #[tokio::test]
+    async fn failures_keep_existing_data_and_schedule_retry() {
+        let mut app = App::new(config(), 30).await.unwrap();
+        app.set_reviews(vec![review(7)]);
+        app.start_load(Tab::PendingReviews, async { anyhow::bail!("offline") });
+        complete(&mut app).await;
+        assert_eq!(app.reviews[0].pr_number, 7);
+        assert!(!app.loading);
+        assert!(app.error.as_deref().unwrap().contains("offline"));
+        assert!(!app.next_refresh_duration().is_zero());
+    }
+
+    #[tokio::test]
+    async fn refresh_deadline_expires_and_zero_disables_auto_refresh() {
+        let mut app = App::new(config(), 30).await.unwrap();
+        app.last_attempt = Some(Instant::now() - Duration::from_secs(31));
+        assert!(app.next_refresh_duration().is_zero());
+        app.refresh_interval = 0;
+        assert_eq!(app.next_refresh_duration(), Duration::MAX);
+    }
+
+    #[tokio::test]
+    async fn selection_survives_reordering_and_shrinking_results() {
+        let mut app = App::new(config(), 30).await.unwrap();
+        app.set_reviews(vec![review(1), review(2), review(3)]);
+        app.next_pr();
+        app.set_reviews(vec![review(2), review(1)]);
+        assert_eq!(app.selected_pr_item().unwrap().pr_number, 2);
+        app.set_reviews(vec![]);
+        assert!(app.selected_pr_item().is_none());
+        assert!(app.filtered_indices.is_empty());
     }
 }
