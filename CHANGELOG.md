@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.2.0] - 2026-10-01
+
 ### Performance
 - Keep TUI input and rendering responsive during GitHub loads; share snapshots and in-flight requests across related views.
 - Reuse one HTTP client and cap PR-list and detail requests at eight concurrent requests across the TUI.
