@@ -265,7 +265,7 @@ pub enum Commands {
     MonitorStatus,
     /// Launch the Terminal User Interface
     Tui {
-        /// Refresh interval in seconds (default: 30)
+        /// Refresh interval in seconds; 0 disables automatic refresh (default: 30)
         #[arg(long, short = 'i', default_value_t = 30)]
         interval: u64,
     },

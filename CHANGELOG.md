@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+## [2.2.0] - 2026-10-01
+
+### Performance
+- Keep TUI input and rendering responsive during GitHub loads; share snapshots and in-flight requests across related views.
+- Reuse one HTTP client and cap PR-list and detail requests at eight concurrent requests across the TUI.
+- Format only visible PR rows and preserve the scrolling viewport; compute summary metrics when data changes.
+
+### Fixed
+- Restore automatic refresh deadlines, support `--interval 0` for manual refresh, and retain results after failed syncs.
+- Publish preloaded views independently; preserve selection by repository and PR number after updates.
+- Treat shortcut letters as text in the filter, confine modal input, and restore the terminal on errors and quit.
+
+### Changed
+- Replace the TUI with a responsive review desk, selected PR details, contextual shortcuts, textual status labels and `NO_COLOR` support.
+- Make `r` request fresh data and make `Esc` close or clear the focused control without exiting.
+- Remove unimplemented actions from the TUI menu instead of claiming review or clipboard operations succeeded.
+
 ## [1.0.0] - 2026-04-08
 
 ### Performance

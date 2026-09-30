@@ -157,69 +157,53 @@ See `prctrl --help` for full command list.
 
 ## Terminal UI Mode (TUI)
 
-Launch an interactive terminal interface for managing PRs:
+A responsive review desk for browsing GitHub pull requests:
+
+![PRCtrl review desk with synthetic example data](docs/src/assets/tui-review-desk.png)
 
 ```bash
-# Start TUI with default 30-second refresh
-prctrl tui
-
-# Custom refresh interval
-prctrl tui -i 60  # Refresh every 60 seconds
-prctrl tui --interval 15  # Refresh every 15 seconds
+prctrl tui                   # Sync every 30 seconds
+prctrl tui --interval 60     # Sync every minute
+prctrl tui --interval 0      # Manual sync only
+NO_COLOR=1 prctrl tui        # Monochrome, with textual status and selection markers
 ```
 
-### Features
+### Views
 
-- **Left Sidebar**: Navigation tabs for different views
-- **Auto-Refresh**: Configurable refresh interval
-- **Smart Caching**: Preloads all tabs for instant switching
-- **Filter Mode**: Type `/` to search PRs by title, author, repo, or number
-- **Action Menu**: Press `Enter` on a PR to see available actions
+| Key | View | Contents |
+|-----|------|----------|
+| `1` | Reviews | PRs requesting your review, including configured teams |
+| `2` | Mine | Your open PRs, including drafts |
+| `3` | Crew | Open PRs by configured crew members; falls back to Reviews if no crew is configured |
+| `4` | Stats | Summary of the Reviews snapshot, before the local text filter |
+| `5` | Live | Reviews with a fresh GitHub sync on entry |
 
-### Tabs
+Network requests run in the background. You can navigate or quit during a sync. Related views share data and in-flight requests; each preload becomes available independently. Existing results remain visible while refreshing or after a failed sync. Manual and periodic refreshes request fresh data; switching ordinary views can use a snapshot cached for up to 60 seconds.
 
-| Tab | Description |
-|-----|-------------|
-| **Pending Reviews** | PRs where you're a requested reviewer |
-| **My PRs** | Your own open pull requests |
-| **Crew** | PRs from your crew members |
-| **Statistics** | Team review metrics |
-| **Monitor Live** | Always fresh data (bypasses cache) |
+Wide terminals show a sidebar; smaller terminals use numbered tabs. The selected PR's title, repository, author, branch, URL and changes appear in a details panel when space permits. `DRAFT`, `OPEN` and `OVERDUE` labels convey status without relying on color. `OVERDUE` means the PR was opened more than seven days ago.
 
-### Keyboard Shortcuts
+### Keyboard
 
 | Key | Action |
 |-----|--------|
-| `↑` / `k` | Previous PR |
-| `↓` / `j` | Next PR |
-| `PageUp` | Previous page (10 PRs) |
-| `PageDown` | Next page (10 PRs) |
-| `Home` | First PR |
-| `End` | Last PR |
-| `Tab` | Next tab |
-| `Shift+Tab` | Previous tab |
-| `/` | Start filter mode |
-| `Ctrl+F` | Clear filter |
-| `Enter` | Show actions for selected PR |
-| `Ctrl+R` | Force refresh (bypass cache) |
-| `R` | Refresh (use cache) |
-| `?` | Toggle help overlay |
-| `Esc` | Close menu/clear filter/quit |
-| `q` | Quit |
+| `Up` / `k`, `Down` / `j` | Move through PRs |
+| `PageUp`, `PageDown` | Move ten PRs |
+| `Home`, `End` | First or last filtered result |
+| `Tab`, `Shift+Tab`, `1`–`5` | Switch views |
+| `/` | Edit the filter by title, author, repository or number |
+| `Enter` while filtering | Apply the filter and return to navigation |
+| `Esc` while filtering | Restore the previous filter |
+| `Esc`, `Ctrl+F` outside filtering | Clear the filter |
+| `Enter` on a PR | Show available actions |
+| `o` | Launch the selected PR in your browser |
+| `r`, `Ctrl+R` | Sync fresh data from GitHub |
+| `?` | Open keyboard help |
+| `Esc` | Close the focused panel or dismiss a notice |
+| `q`, `Ctrl+C` | Quit; `q` remains text while editing the filter |
 
-### Action Menu
+The action menu offers browser launch and returning to the list. Review, approval, diff and AI actions remain available through the CLI; the TUI does not report placeholder actions as successful.
 
-When you select a PR and press `Enter`, you can:
-
-| Action | Description |
-|--------|-------------|
-| **Open in Browser** | Open PR in your default browser |
-| **Claude Code Review** | Launch AI-powered code review |
-| **Copy URL** | Copy PR URL to clipboard |
-| **Show Diff** | View PR diff |
-| **Approve PR** | Approve the pull request |
-| **Request Changes** | Request changes on the PR |
-| **Cancel** | Close the menu |
+To generate synthetic preview cells without contacting GitHub, run `cargo run --example tui_preview -- /tmp/prctrl-preview.json 120 32`.
 
 ## Workflow Example
 
@@ -233,7 +217,7 @@ prctrl approve 4821
 # Deep work: Delegate triage to AI
 prctrl delegate
 
-# Interactive: Use Terminal UI for full management
+# Interactive: Browse PRs in the review desk
 prctrl tui
 
 # End of day: Check team stats

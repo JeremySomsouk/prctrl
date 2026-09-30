@@ -4,6 +4,7 @@
 
 ## Core Commands
 
+- [tui](commands/tui.md)
 - [list](commands/list.md)
 - [delegate](commands/delegate.md)
 - [mine](commands/mine.md)
