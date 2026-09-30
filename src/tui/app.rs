@@ -10,61 +10,33 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::task::JoinSet;
 
-/// Actions available for a selected PR
+/// Only actions implemented by the TUI are advertised.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum PrAction {
-    /// Open PR in browser
     OpenInBrowser,
-    /// Launch Claude Code review
-    ClaudeReview,
-    /// Copy PR URL to clipboard
-    CopyUrl,
-    /// Show PR diff
-    ShowDiff,
-    /// Approve PR
-    Approve,
-    /// Request changes
-    RequestChanges,
-    /// Cancel/close menu
     Cancel,
 }
 
 impl PrAction {
-    pub fn all() -> Vec<PrAction> {
-        vec![
-            PrAction::OpenInBrowser,
-            PrAction::ClaudeReview,
-            PrAction::CopyUrl,
-            PrAction::ShowDiff,
-            PrAction::Approve,
-            PrAction::RequestChanges,
-            PrAction::Cancel,
-        ]
+    pub fn all() -> &'static [PrAction] {
+        &[Self::OpenInBrowser, Self::Cancel]
     }
-
     pub fn display(&self) -> &'static str {
         match self {
-            PrAction::OpenInBrowser => "Open in Browser",
-            PrAction::ClaudeReview => "Claude Code Review",
-            PrAction::CopyUrl => "Copy URL",
-            PrAction::ShowDiff => "Show Diff",
-            PrAction::Approve => "Approve PR",
-            PrAction::RequestChanges => "Request Changes",
-            PrAction::Cancel => "Cancel",
+            Self::OpenInBrowser => "Open in browser",
+            Self::Cancel => "Back to list",
         }
     }
+}
 
-    pub fn icon(&self) -> &'static str {
-        match self {
-            PrAction::OpenInBrowser => "🌐",
-            PrAction::ClaudeReview => "🤖",
-            PrAction::CopyUrl => "📋",
-            PrAction::ShowDiff => "📊",
-            PrAction::Approve => "✅",
-            PrAction::RequestChanges => "❌",
-            PrAction::Cancel => "↩️",
-        }
-    }
+#[derive(Default)]
+pub struct ReviewSummary {
+    pub drafts: usize,
+    pub older: usize,
+    pub authors: usize,
+    pub repos: usize,
+    pub additions: u64,
+    pub deletions: u64,
 }
 
 /// Application state for the TUI
@@ -91,6 +63,10 @@ pub struct App {
     pub info: Option<String>,
     /// Filter string for PR list
     pub filter: String,
+    pub filter_editing: bool,
+    pub(crate) filter_before_edit: String,
+    pub use_color: bool,
+    pub summary: ReviewSummary,
     /// Whether to show the help overlay
     pub show_help: bool,
     /// Whether to show the action menu for selected PR
@@ -156,14 +132,14 @@ impl Tab {
         ]
     }
 
-    /// Get the icon for the tab
-    pub fn icon(&self) -> &'static str {
+    /// Short labels for responsive navigation
+    pub fn short_name(&self) -> &'static str {
         match self {
-            Tab::PendingReviews => "📋",
-            Tab::MyPullRequests => "👤",
-            Tab::Crew => "👥",
-            Tab::Statistics => "📊",
-            Tab::MonitorLive => "🔍",
+            Tab::PendingReviews => "Reviews",
+            Tab::MyPullRequests => "Mine",
+            Tab::Crew => "Crew",
+            Tab::Statistics => "Stats",
+            Tab::MonitorLive => "Live",
         }
     }
 }
@@ -189,6 +165,10 @@ impl App {
             error: None,
             info: None,
             filter: String::new(),
+            filter_editing: false,
+            filter_before_edit: String::new(),
+            use_color: std::env::var_os("NO_COLOR").is_none(),
+            summary: ReviewSummary::default(),
             show_help: false,
             show_action_menu: false,
             selected_action: 0,
@@ -339,11 +319,38 @@ impl App {
     }
 
     fn set_reviews(&mut self, reviews: Arc<[PendingReview]>) {
+        if Arc::ptr_eq(&self.reviews, &reviews) {
+            return;
+        }
         let selected = self
             .selected_pr_item()
             .map(|pr| (pr.repo.clone(), pr.pr_number));
         self.reviews = reviews;
+        let now = chrono::Utc::now();
+        self.summary = ReviewSummary {
+            drafts: self.reviews.iter().filter(|pr| pr.draft).count(),
+            older: self
+                .reviews
+                .iter()
+                .filter(|pr| (now - pr.created_at).num_days() > 7)
+                .count(),
+            authors: self
+                .reviews
+                .iter()
+                .map(|pr| &pr.pr_author)
+                .collect::<HashSet<_>>()
+                .len(),
+            repos: self
+                .reviews
+                .iter()
+                .map(|pr| &pr.repo)
+                .collect::<HashSet<_>>()
+                .len(),
+            additions: self.reviews.iter().map(|pr| pr.additions).sum(),
+            deletions: self.reviews.iter().map(|pr| pr.deletions).sum(),
+        };
         self.selected_pr = selected
+            .clone()
             .and_then(|(repo, number)| {
                 self.reviews
                     .iter()
@@ -351,6 +358,13 @@ impl App {
             })
             .unwrap_or(0);
         self.update_filtered_indices();
+        if selected
+            != self
+                .selected_pr_item()
+                .map(|pr| (pr.repo.clone(), pr.pr_number))
+        {
+            self.show_action_menu = false;
+        }
     }
 
     /// Each tab becomes usable as soon as its own load completes.
@@ -451,6 +465,7 @@ impl App {
         if index < self.tabs.len() && self.active_tab != self.tabs[index] {
             self.active_tab = self.tabs[index];
             self.reviews = Arc::from([]);
+            self.summary = ReviewSummary::default();
             self.selected_pr = 0;
             self.update_filtered_indices();
             self.last_refresh = None;

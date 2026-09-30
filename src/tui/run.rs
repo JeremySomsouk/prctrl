@@ -105,81 +105,78 @@ async fn handle_event(app: &mut App, event: Event) -> Result<bool> {
     }
 }
 
-/// Handle keyboard input
+/// Route input to the focused control before interpreting global shortcuts.
 async fn handle_key_event(app: &mut App, key: crossterm::event::KeyEvent) -> Result<bool> {
     use crossterm::event::{KeyCode, KeyModifiers};
-
-    // Clear info/error popup on any key press (unless we're in a special mode)
-    if (app.info.is_some() || app.error.is_some()) && !app.show_action_menu && !app.show_help {
-        app.info = None;
-        app.error = None;
+    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+    if ctrl && key.code == KeyCode::Char('c') {
+        return Ok(false);
     }
-
-    match key.code {
-        // Quit
-        KeyCode::Char('q') | KeyCode::Char('Q') => {
-            return Ok(false);
+    if ctrl && key.code == KeyCode::Char('f') {
+        app.filter.clear();
+        app.filter_editing = false;
+        app.update_filtered_indices();
+        return Ok(true);
+    }
+    if app.filter_editing {
+        match key.code {
+            KeyCode::Enter => app.filter_editing = false,
+            KeyCode::Esc => {
+                app.filter = app.filter_before_edit.clone();
+                app.filter_editing = false;
+            }
+            KeyCode::Backspace => {
+                app.filter.pop();
+            }
+            KeyCode::Delete => app.filter.clear(),
+            KeyCode::Char(c) if !ctrl && !key.modifiers.contains(KeyModifiers::ALT) => {
+                app.filter.push(c)
+            }
+            _ => {}
         }
+        app.update_filtered_indices();
+        return Ok(true);
+    }
+    if matches!(key.code, KeyCode::Char('q') | KeyCode::Char('Q')) {
+        return Ok(false);
+    }
+    if app.show_help {
+        if matches!(key.code, KeyCode::Esc | KeyCode::Char('?')) {
+            app.show_help = false;
+        }
+        return Ok(true);
+    }
+    if app.show_action_menu {
+        match key.code {
+            KeyCode::Esc => app.show_action_menu = false,
+            KeyCode::Down | KeyCode::Char('j') => {
+                app.selected_action =
+                    (app.selected_action + 1).min(crate::tui::app::PrAction::all().len() - 1)
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                app.selected_action = app.selected_action.saturating_sub(1)
+            }
+            KeyCode::Enter => handle_action(app),
+            _ => {}
+        }
+        return Ok(true);
+    }
+    match key.code {
         KeyCode::Esc => {
-            // Close action menu, help, or filter, or clear info/error
-            if app.show_action_menu {
-                app.show_action_menu = false;
-            } else if !app.filter.is_empty() {
+            if !app.filter.is_empty() {
                 app.filter.clear();
                 app.update_filtered_indices();
-            } else if app.show_help {
-                app.show_help = false;
-            } else if app.info.is_some() || app.error.is_some() {
-                // Dismiss info or error popup
+            } else {
                 app.info = None;
                 app.error = None;
-            } else {
-                return Ok(false);
             }
         }
-
-        // Navigation
-        KeyCode::Down | KeyCode::Char('j') => {
-            if app.show_action_menu {
-                // Navigate action menu
-                let actions = crate::tui::app::PrAction::all();
-                if app.selected_action < actions.len() - 1 {
-                    app.selected_action += 1;
-                }
-            } else {
-                app.next_pr();
-            }
-        }
-        KeyCode::Up | KeyCode::Char('k') => {
-            if app.show_action_menu {
-                // Navigate action menu
-                if app.selected_action > 0 {
-                    app.selected_action -= 1;
-                }
-            } else {
-                app.prev_pr();
-            }
-        }
-        KeyCode::PageDown => {
-            // Page down - move 10 items
-            for _ in 0..10 {
-                app.next_pr();
-            }
-        }
-        KeyCode::PageUp => {
-            // Page up - move 10 items
-            for _ in 0..10 {
-                app.prev_pr();
-            }
-        }
-        KeyCode::Home => {
-            app.select_position(0);
-        }
-        KeyCode::End => {
-            app.select_position(app.filtered_indices.len().saturating_sub(1));
-        }
-
-        // Tab switching
+        KeyCode::Down | KeyCode::Char('j') => app.next_pr(),
+        KeyCode::Up | KeyCode::Char('k') => app.prev_pr(),
+        KeyCode::PageDown => app.select_position(app.filtered_position.saturating_add(10)),
+        KeyCode::PageUp => app.select_position(app.filtered_position.saturating_sub(10)),
+        KeyCode::Home => app.select_position(0),
+        KeyCode::End => app.select_position(app.filtered_indices.len().saturating_sub(1)),
         KeyCode::Tab => {
             if key.modifiers.contains(KeyModifiers::SHIFT) {
                 app.prev_tab();
@@ -192,146 +189,138 @@ async fn handle_key_event(app: &mut App, key: crossterm::event::KeyEvent) -> Res
             app.prev_tab();
             app.refresh().await?;
         }
-
-        // Filter
-        KeyCode::Char('/') => {
-            // Start filter mode
-            app.filter = String::from("/");
-            app.update_filtered_indices();
-        }
-        KeyCode::Char('f') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            // Clear filter
-            app.filter.clear();
-            app.update_filtered_indices();
-        }
-
-        // Force refresh (bypasses cache) - must come before regular refresh
-        KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            app.force_refresh().await?;
-        }
-        // Refresh (uses cache if available)
-        KeyCode::Char('r') | KeyCode::Char('R') => {
+        KeyCode::Char(c @ '1'..='5') => {
+            app.set_active_tab(c as usize - '1' as usize);
             app.refresh().await?;
         }
-
-        // Help
-        KeyCode::Char('?') => {
-            app.show_help = !app.show_help;
+        KeyCode::Char('/') => {
+            app.filter_before_edit = app.filter.clone();
+            app.filter_editing = true;
         }
-
-        // Filter input (must come after specific char patterns)
-        KeyCode::Char(c) => {
-            if !app.filter.is_empty() {
-                // If we're in filter mode, add to filter
-                // Skip the leading '/' if present
-                if app.filter == "/" {
-                    app.filter.clear();
-                }
-                app.filter.push(c);
-                app.update_filtered_indices();
-            }
+        KeyCode::Char('r') | KeyCode::Char('R') => app.force_refresh().await?,
+        KeyCode::Char('?') => app.show_help = true,
+        KeyCode::Char('o') if app.active_tab != crate::tui::app::Tab::Statistics => {
+            open_selected(app)
         }
-        KeyCode::Backspace => {
-            if !app.filter.is_empty() {
-                app.filter.pop();
-                // If filter becomes empty, clear it completely
-                if app.filter.is_empty() {
-                    app.filter.clear();
-                }
-                app.update_filtered_indices();
-            }
+        KeyCode::Enter
+            if app.selected_pr_item().is_some()
+                && app.active_tab != crate::tui::app::Tab::Statistics =>
+        {
+            app.show_action_menu = true;
+            app.selected_action = 0;
         }
-        KeyCode::Delete => {
-            app.filter.clear();
-            app.update_filtered_indices();
-        }
-
-        // Select PR or action
-        KeyCode::Enter => {
-            if app.show_action_menu {
-                // Execute the selected action
-                handle_action(app).await?;
-            } else if app.selected_pr_item().is_some() {
-                // Show action menu for this PR
-                app.show_action_menu = true;
-                app.selected_action = 0;
-            }
-        }
-
-        // Ignore other keys
         _ => {}
     }
-
     Ok(true)
 }
 
-/// Handle the selected action from the action menu
-async fn handle_action(app: &mut App) -> Result<()> {
-    use crate::tui::app::PrAction;
+fn open_selected(app: &mut App) {
+    if let Some(pr) = app.selected_pr_item() {
+        match open::that_detached(&pr.pr_url) {
+            Ok(()) => {
+                app.error = None;
+                app.info = Some("Browser launch requested.".into());
+            }
+            Err(error) => app.error = Some(format!("Cannot launch browser: {error}")),
+        }
+    }
+}
 
-    let actions = PrAction::all();
-    let selected = actions
+fn handle_action(app: &mut App) {
+    use crate::tui::app::PrAction;
+    let selected = PrAction::all()
         .get(app.selected_action)
         .copied()
         .unwrap_or(PrAction::Cancel);
-
-    // Close the action menu
     app.show_action_menu = false;
+    if selected == PrAction::OpenInBrowser {
+        open_selected(app);
+    }
+}
 
-    match selected {
-        PrAction::OpenInBrowser => {
-            if let Some(pr) = app.selected_pr_item() {
-                // Use the open crate to open the URL in the default browser
-                if let Err(e) = open::that(&pr.pr_url) {
-                    app.error = Some(format!("Failed to open browser: {}", e));
-                }
-            }
-        }
-        PrAction::ClaudeReview => {
-            if let Some(pr) = app.selected_pr_item() {
-                // In a real implementation, this would call the Claude API
-                // For now, set info message
-                app.info = Some(format!(
-                    "Claude Code review would be launched for: {}",
-                    pr.pr_title
-                ));
-            }
-        }
-        PrAction::CopyUrl => {
-            if let Some(pr) = app.selected_pr_item() {
-                // Copy URL to clipboard using arboard or clipboard crate
-                // For now, set info message
-                app.info = Some(format!("Copied URL: {}", pr.pr_url));
-            }
-        }
-        PrAction::ShowDiff => {
-            if let Some(pr) = app.selected_pr_item() {
-                // Would show diff in a real implementation
-                app.info = Some(format!(
-                    "Showing diff for PR #{} - {}",
-                    pr.pr_number, pr.pr_title
-                ));
-            }
-        }
-        PrAction::Approve => {
-            if let Some(pr) = app.selected_pr_item() {
-                // Would approve PR in a real implementation
-                app.info = Some(format!("Approved PR #{} - {}", pr.pr_number, pr.pr_title));
-            }
-        }
-        PrAction::RequestChanges => {
-            if let Some(pr) = app.selected_pr_item() {
-                // Would request changes in a real implementation
-                app.info = Some(format!(
-                    "Requested changes for PR #{} - {}",
-                    pr.pr_number, pr.pr_title
-                ));
-            }
-        }
-        PrAction::Cancel => {
-            // Already closed the menu, nothing to do
-        }
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tui::app::tests::{config, review};
+    use crate::tui::app::Tab;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    async fn key(app: &mut App, code: KeyCode) -> bool {
+        handle_key_event(app, KeyEvent::new(code, KeyModifiers::NONE))
+            .await
+            .unwrap()
     }
 
-    Ok(())
+    #[tokio::test]
+    async fn filter_accepts_shortcut_letters_without_running_commands() {
+        let mut app = App::new(config(), 30).await.unwrap();
+        key(&mut app, KeyCode::Char('/')).await;
+        for c in "qrjk?123/".chars() {
+            assert!(key(&mut app, KeyCode::Char(c)).await);
+        }
+        assert_eq!(app.filter, "qrjk?123/");
+        assert_eq!(app.active_tab, Tab::PendingReviews);
+        assert!(app.loads.is_empty());
+        key(&mut app, KeyCode::Enter).await;
+        assert!(!app.filter_editing);
+        key(&mut app, KeyCode::Char('/')).await;
+        key(&mut app, KeyCode::Char('x')).await;
+        key(&mut app, KeyCode::Esc).await;
+        assert_eq!(app.filter, "qrjk?123/");
+        key(&mut app, KeyCode::Esc).await;
+        assert!(app.filter.is_empty());
+        assert!(key(&mut app, KeyCode::Esc).await);
+        assert!(!key(&mut app, KeyCode::Char('q')).await);
+    }
+
+    #[tokio::test]
+    async fn empty_filter_stays_focused_after_backspace() {
+        let mut app = App::new(config(), 30).await.unwrap();
+        key(&mut app, KeyCode::Char('/')).await;
+        key(&mut app, KeyCode::Char('x')).await;
+        key(&mut app, KeyCode::Backspace).await;
+        assert!(key(&mut app, KeyCode::Char('q')).await);
+        assert_eq!(app.filter, "q");
+    }
+
+    #[tokio::test]
+    async fn help_and_menus_capture_input_and_empty_results_disable_actions() {
+        let mut app = App::new(config(), 30).await.unwrap();
+        app.finish_load(Tab::PendingReviews, Ok(vec![review(1), review(2)]))
+            .await;
+        key(&mut app, KeyCode::Char('?')).await;
+        key(&mut app, KeyCode::Down).await;
+        key(&mut app, KeyCode::Tab).await;
+        assert_eq!(app.selected_pr, 0);
+        assert_eq!(app.active_tab, Tab::PendingReviews);
+        key(&mut app, KeyCode::Esc).await;
+        key(&mut app, KeyCode::Enter).await;
+        key(&mut app, KeyCode::Tab).await;
+        assert_eq!(app.active_tab, Tab::PendingReviews);
+        key(&mut app, KeyCode::Esc).await;
+        app.filter = "no match".into();
+        app.update_filtered_indices();
+        key(&mut app, KeyCode::Enter).await;
+        assert!(!app.show_action_menu);
+    }
+
+    #[tokio::test]
+    async fn home_end_follow_filtered_rows_and_refresh_bypasses_cache() {
+        let mut app = App::new(config(), 30).await.unwrap();
+        app.finish_load(
+            Tab::PendingReviews,
+            Ok(vec![review(10), review(20), review(21)]),
+        )
+        .await;
+        app.filter = "feature 2".into();
+        app.update_filtered_indices();
+        key(&mut app, KeyCode::End).await;
+        assert_eq!(app.selected_pr_item().unwrap().pr_number, 21);
+        key(&mut app, KeyCode::Home).await;
+        assert_eq!(app.selected_pr_item().unwrap().pr_number, 20);
+        key(&mut app, KeyCode::Char('r')).await;
+        assert!(app.loading);
+        assert_eq!(app.loads.len(), 1);
+        assert!(!key(&mut app, KeyCode::Char('q')).await);
+    }
 }
