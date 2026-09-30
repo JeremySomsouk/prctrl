@@ -1,4 +1,3 @@
-use crate::github::PendingReview;
 use crate::tui::app::{App, PrAction, Tab};
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -150,7 +149,7 @@ impl Ui {
     }
 
     /// Draw the main content area
-    fn draw_main_content(frame: &mut Frame, app: &App, area: Rect) {
+    fn draw_main_content(frame: &mut Frame, app: &mut App, area: Rect) {
         // Split main area into header, content, and footer
         let areas = Layout::default()
             .direction(Direction::Vertical)
@@ -210,13 +209,14 @@ impl Ui {
     }
 
     /// Draw the PR list
-    fn draw_pr_list(frame: &mut Frame, app: &App, area: Rect) {
-        let filtered_reviews = app.filtered_reviews();
+    fn draw_pr_list(frame: &mut Frame, app: &mut App, area: Rect) {
+        let visible = app.visible_range(area.height.saturating_sub(2) as usize);
 
         // Create table rows
-        let rows: Vec<Row> = filtered_reviews
+        let rows: Vec<Row> = app.filtered_indices[visible.clone()]
             .iter()
-            .map(|pr| {
+            .map(|&idx| {
+                let pr = &app.reviews[idx];
                 let age = Self::format_duration(pr.created_at);
                 let age_days = (chrono::Utc::now() - pr.created_at).num_days();
                 let size = format!("+{}/-{}", pr.additions, pr.deletions);
@@ -309,17 +309,9 @@ impl Ui {
             )
             .column_spacing(1);
 
-        // Find the selected index in the filtered list
-        let selected_index = app.filtered_reviews().iter().position(|&pr| {
-            let pr_ptr = pr as *const PendingReview;
-            let selected_ptr = &app.reviews[app.selected_pr] as *const PendingReview;
-            std::ptr::eq(pr_ptr, selected_ptr)
-        });
-
-        // Render table
         let mut state = ratatui::widgets::TableState::default();
-        if let Some(index) = selected_index {
-            state.select(Some(index));
+        if !visible.is_empty() {
+            state.select(Some(app.filtered_position - visible.start));
         }
 
         frame.render_stateful_widget(table, area, &mut state);
@@ -410,7 +402,7 @@ impl Ui {
 
     /// Draw main footer with status and keyboard hints
     fn draw_main_footer(frame: &mut Frame, app: &App, area: Rect) {
-        let filtered_count = app.filtered_reviews().len();
+        let filtered_count = app.filtered_indices.len();
         let total_count = app.reviews.len();
 
         let status_text = if app.filter.is_empty() {

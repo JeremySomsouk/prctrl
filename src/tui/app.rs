@@ -105,6 +105,7 @@ pub struct App {
     pub filtered_indices: Vec<usize>,
     /// Current position in filtered list
     pub filtered_position: usize,
+    viewport_offset: usize,
     pub(crate) loads: JoinSet<(Tab, Result<Vec<PendingReview>>)>,
     pending: HashSet<Tab>,
     last_attempt: Option<Instant>,
@@ -195,6 +196,7 @@ impl App {
             snapshots: HashMap::new(),
             filtered_indices: vec![],
             filtered_position: 0,
+            viewport_offset: 0,
             loads: JoinSet::new(),
             pending: HashSet::new(),
             last_attempt: None,
@@ -394,12 +396,28 @@ impl App {
         }
     }
 
-    /// Get filtered reviews based on current filter string
-    pub fn filtered_reviews(&self) -> Vec<&PendingReview> {
-        self.filtered_indices
-            .iter()
-            .map(|&idx| &self.reviews[idx])
-            .collect()
+    /// Keep the viewport stable until the selection moves outside it.
+    pub(crate) fn visible_range(&mut self, rows: usize) -> std::ops::Range<usize> {
+        let len = self.filtered_indices.len();
+        if rows == 0 || len == 0 {
+            return 0..0;
+        }
+        let selected = self.filtered_position.min(len - 1);
+        self.viewport_offset = self.viewport_offset.min(len.saturating_sub(rows));
+        if selected < self.viewport_offset {
+            self.viewport_offset = selected;
+        }
+        if selected >= self.viewport_offset + rows {
+            self.viewport_offset = selected + 1 - rows;
+        }
+        self.viewport_offset..(self.viewport_offset + rows).min(len)
+    }
+
+    pub(crate) fn select_position(&mut self, position: usize) {
+        if !self.filtered_indices.is_empty() {
+            self.filtered_position = position.min(self.filtered_indices.len() - 1);
+            self.selected_pr = self.filtered_indices[self.filtered_position];
+        }
     }
 
     /// Get the next refresh duration
@@ -468,7 +486,11 @@ impl App {
 
     /// Get the currently selected PR
     pub fn selected_pr_item(&self) -> Option<&PendingReview> {
-        self.reviews.get(self.selected_pr)
+        if self.filtered_indices.is_empty() {
+            None
+        } else {
+            self.reviews.get(self.selected_pr)
+        }
     }
 }
 
@@ -616,5 +638,26 @@ pub(crate) mod tests {
         assert_eq!(app.reviews[0].pr_number, 7);
         assert!(app.loading);
         assert_eq!(app.loads.len(), 1);
+    }
+    #[tokio::test]
+    async fn viewport_is_stable_and_bounded_for_large_and_filtered_lists() {
+        let mut app = App::new(config(), 30).await.unwrap();
+        app.set_reviews((0..10_000).map(review).collect::<Vec<_>>().into());
+        assert_eq!(app.visible_range(12), 0..12);
+        app.select_position(5);
+        assert_eq!(app.visible_range(12), 0..12);
+        app.select_position(12);
+        assert_eq!(app.visible_range(12), 1..13);
+        app.select_position(9_999);
+        assert_eq!(app.visible_range(12), 9_988..10_000);
+        app.filter = "feature 99".into();
+        app.update_filtered_indices();
+        let range = app.visible_range(12);
+        assert!(range.len() <= 12);
+        assert!(range.contains(&app.filtered_position));
+        app.filter = "no match".into();
+        app.update_filtered_indices();
+        assert_eq!(app.visible_range(12), 0..0);
+        assert!(app.selected_pr_item().is_none());
     }
 }

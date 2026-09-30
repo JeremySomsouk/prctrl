@@ -173,10 +173,10 @@ async fn handle_key_event(app: &mut App, key: crossterm::event::KeyEvent) -> Res
             }
         }
         KeyCode::Home => {
-            app.selected_pr = 0;
+            app.select_position(0);
         }
         KeyCode::End => {
-            app.selected_pr = app.reviews.len().saturating_sub(1);
+            app.select_position(app.filtered_indices.len().saturating_sub(1));
         }
 
         // Tab switching
