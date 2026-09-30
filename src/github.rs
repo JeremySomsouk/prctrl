@@ -4,6 +4,37 @@ use futures::future::join_all;
 use octocrab::Octocrab;
 use serde::Serialize;
 
+/// Shared transport and request budget across TUI datasets.
+#[derive(Clone)]
+pub(crate) struct ReviewClient {
+    client: Octocrab,
+    limiter: std::sync::Arc<tokio::sync::Semaphore>,
+    strict: bool,
+}
+
+impl ReviewClient {
+    pub(crate) fn new(token: &str, strict: bool) -> Self {
+        Self {
+            client: new_client(token),
+            limiter: std::sync::Arc::new(tokio::sync::Semaphore::new(8)),
+            strict,
+        }
+    }
+
+    async fn request<T>(
+        &self,
+        request: impl std::future::Future<Output = octocrab::Result<T>>,
+    ) -> octocrab::Result<T> {
+        // The semaphore is private and never closed. Keep the permit through the response.
+        let _permit = self
+            .limiter
+            .acquire()
+            .await
+            .expect("request budget is open");
+        request.await
+    }
+}
+
 /// Create a shared Octocrab client.
 ///
 /// All functions should use this instead of building their own client.
@@ -93,6 +124,35 @@ pub async fn fetch_pending_reviews(
     crew_members: &[String],
     max_age_days: Option<u32>,
 ) -> Result<Vec<PendingReview>> {
+    let transport = ReviewClient::new(token, false);
+    fetch_pending_reviews_with_client(
+        &transport,
+        org,
+        repos,
+        username,
+        teams,
+        include_mine,
+        include_drafts,
+        exclude_prefixes,
+        crew_members,
+        max_age_days,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn fetch_pending_reviews_with_client(
+    transport: &ReviewClient,
+    org: &str,
+    repos: &[String],
+    username: &str,
+    teams: &[String],
+    include_mine: bool,
+    include_drafts: bool,
+    exclude_prefixes: &[String],
+    crew_members: &[String],
+    max_age_days: Option<u32>,
+) -> Result<Vec<PendingReview>> {
     // Collect candidate PRs across all repos with pagination
     #[derive(Clone)]
     struct CandidatePr {
@@ -112,28 +172,32 @@ pub async fn fetch_pending_reviews(
 
     // Parallel fetch PR lists from all repos with full pagination
     let repo_futures = repos.iter().map(|repo| {
-        let client = new_client(token);
+        let client = &transport.client;
         let repo = repo.clone();
         async move {
             let mut all_prs = Vec::new();
-            let first_page = client
-                .pulls(org, &repo)
-                .list()
-                .state(octocrab::params::State::Open)
-                .per_page(100)
-                .send()
+            let first_page = transport
+                .request(
+                    client
+                        .pulls(org, &repo)
+                        .list()
+                        .state(octocrab::params::State::Open)
+                        .per_page(100)
+                        .send(),
+                )
                 .await?;
 
             all_prs.extend(first_page.items);
 
             let mut next_page = first_page.next;
             while next_page.is_some() {
-                match client.get_page(&next_page).await {
+                match transport.request(client.get_page(&next_page)).await {
                     Ok(Some(page)) => {
                         next_page = page.next.clone();
                         all_prs.extend(page.items);
                     }
                     Ok(None) => break,
+                    Err(error) if transport.strict => return Err(error),
                     Err(_) => break,
                 }
             }
@@ -142,17 +206,14 @@ pub async fn fetch_pending_reviews(
         }
     });
 
-    let repo_results: Vec<(String, Vec<_>)> = join_all(repo_futures)
-        .await
-        .into_iter()
-        .filter_map(|result| match result {
-            Ok((repo, items)) => Some((repo, items)),
-            Err(e) => {
-                eprintln!("Warning: Failed to fetch PRs from a repo: {}", e);
-                None
-            }
-        })
-        .collect();
+    let mut repo_results = Vec::new();
+    for result in join_all(repo_futures).await {
+        match result {
+            Ok(data) => repo_results.push(data),
+            Err(error) if transport.strict => return Err(error.into()),
+            Err(error) => eprintln!("Warning: Failed to fetch PRs from a repo: {error}"),
+        }
+    }
 
     for (repo, prs) in repo_results {
         for pr in prs {
@@ -243,13 +304,25 @@ pub async fn fetch_pending_reviews(
         .partition::<Vec<_>, _>(|c| c.additions.is_none() || c.deletions.is_none());
 
     let detail_futures = needs_detail.iter().map(|c| {
-        let client = new_client(token);
+        let client = &transport.client;
         let repo = c.repo.clone();
         let number = c.number;
-        async move { client.pulls(org, &repo).get(number).await }
+        async move {
+            transport
+                .request(client.pulls(org, &repo).get(number))
+                .await
+        }
     });
 
     let details: Vec<Result<_, _>> = join_all(detail_futures).await;
+
+    if transport.strict {
+        for result in &details {
+            if let Err(error) = result {
+                anyhow::bail!("Failed to load PR details: {error}");
+            }
+        }
+    }
 
     let detail_map: std::collections::HashMap<(String, u64), (u64, u64)> = needs_detail
         .into_iter()
@@ -308,6 +381,29 @@ pub async fn fetch_my_open_prs(
     exclude_prefixes: &[String],
     max_age_days: Option<u32>,
 ) -> Result<Vec<PendingReview>> {
+    let transport = ReviewClient::new(token, false);
+    fetch_my_open_prs_with_client(
+        &transport,
+        org,
+        repos,
+        username,
+        include_drafts,
+        exclude_prefixes,
+        max_age_days,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn fetch_my_open_prs_with_client(
+    transport: &ReviewClient,
+    org: &str,
+    repos: &[String],
+    username: &str,
+    include_drafts: bool,
+    exclude_prefixes: &[String],
+    max_age_days: Option<u32>,
+) -> Result<Vec<PendingReview>> {
     // Collect candidate PRs across all repos with full pagination
     #[derive(Clone)]
     struct CandidatePr {
@@ -327,28 +423,32 @@ pub async fn fetch_my_open_prs(
 
     // Parallel fetch PR lists from all repos with pagination
     let repo_futures = repos.iter().map(|repo| {
-        let client = new_client(token);
+        let client = &transport.client;
         let repo = repo.clone();
         async move {
             let mut all_prs = Vec::new();
-            let first_page = client
-                .pulls(org, &repo)
-                .list()
-                .state(octocrab::params::State::Open)
-                .per_page(100)
-                .send()
+            let first_page = transport
+                .request(
+                    client
+                        .pulls(org, &repo)
+                        .list()
+                        .state(octocrab::params::State::Open)
+                        .per_page(100)
+                        .send(),
+                )
                 .await?;
 
             all_prs.extend(first_page.items);
 
             let mut next_page = first_page.next;
             while next_page.is_some() {
-                match client.get_page(&next_page).await {
+                match transport.request(client.get_page(&next_page)).await {
                     Ok(Some(page)) => {
                         next_page = page.next.clone();
                         all_prs.extend(page.items);
                     }
                     Ok(None) => break,
+                    Err(error) if transport.strict => return Err(error),
                     Err(_) => break,
                 }
             }
@@ -357,17 +457,14 @@ pub async fn fetch_my_open_prs(
         }
     });
 
-    let repo_results: Vec<(String, Vec<_>)> = join_all(repo_futures)
-        .await
-        .into_iter()
-        .filter_map(|result| match result {
-            Ok((repo, items)) => Some((repo, items)),
-            Err(e) => {
-                eprintln!("Warning: Failed to fetch PRs from a repo: {}", e);
-                None
-            }
-        })
-        .collect();
+    let mut repo_results = Vec::new();
+    for result in join_all(repo_futures).await {
+        match result {
+            Ok(data) => repo_results.push(data),
+            Err(error) if transport.strict => return Err(error.into()),
+            Err(error) => eprintln!("Warning: Failed to fetch PRs from a repo: {error}"),
+        }
+    }
 
     for (repo, prs) in repo_results {
         for pr in prs {
@@ -430,13 +527,25 @@ pub async fn fetch_my_open_prs(
         .partition::<Vec<_>, _>(|c| c.additions.is_none() || c.deletions.is_none());
 
     let detail_futures = needs_detail.iter().map(|c| {
-        let client = new_client(token);
+        let client = &transport.client;
         let repo = c.repo.clone();
         let number = c.number;
-        async move { client.pulls(org, &repo).get(number).await }
+        async move {
+            transport
+                .request(client.pulls(org, &repo).get(number))
+                .await
+        }
     });
 
     let details: Vec<Result<_, _>> = join_all(detail_futures).await;
+
+    if transport.strict {
+        for result in &details {
+            if let Err(error) = result {
+                anyhow::bail!("Failed to load PR details: {error}");
+            }
+        }
+    }
 
     let detail_map: std::collections::HashMap<(String, u64), (u64, u64)> = needs_detail
         .into_iter()
@@ -1709,4 +1818,180 @@ pub async fn fetch_prs_user_commented_on(
         .collect();
 
     Ok(commented_prs)
+}
+
+#[cfg(test)]
+mod review_transport_tests {
+    use super::*;
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    async fn read_headers(socket: &mut tokio::net::TcpStream) -> String {
+        let mut request = Vec::new();
+        loop {
+            let mut buffer = [0; 1024];
+            let count = socket.read(&mut buffer).await.unwrap();
+            assert!(count > 0, "connection ended before HTTP headers");
+            request.extend_from_slice(&buffer[..count]);
+            if request.windows(4).any(|bytes| bytes == b"\r\n\r\n") {
+                break;
+            }
+        }
+        String::from_utf8(request).unwrap()
+    }
+
+    #[tokio::test]
+    async fn request_budget_is_shared_and_released_when_cancelled() {
+        let transport = ReviewClient::new("test-token", true);
+        let entered = Arc::new(AtomicUsize::new(0));
+        let barrier = Arc::new(tokio::sync::Barrier::new(9));
+        let mut tasks = tokio::task::JoinSet::new();
+        for _ in 0..24 {
+            let transport = transport.clone();
+            let entered = entered.clone();
+            let barrier = barrier.clone();
+            tasks.spawn(async move {
+                transport
+                    .request(async move {
+                        entered.fetch_add(1, Ordering::SeqCst);
+                        barrier.wait().await;
+                        std::future::pending::<octocrab::Result<()>>().await
+                    })
+                    .await
+            });
+        }
+        tokio::time::timeout(std::time::Duration::from_secs(2), barrier.wait())
+            .await
+            .unwrap();
+        assert_eq!(entered.load(Ordering::SeqCst), 8);
+        tasks.abort_all();
+        while tasks.join_next().await.is_some() {}
+        assert_eq!(transport.limiter.available_permits(), 8);
+    }
+
+    fn pr(number: u64, details: bool) -> serde_json::Value {
+        let mut author = serde_json::json!({
+            "login": "teammate", "id": 1, "node_id": "user", "gravatar_id": "",
+            "type": "User", "site_admin": false
+        });
+        for field in [
+            "avatar_url",
+            "url",
+            "html_url",
+            "followers_url",
+            "following_url",
+            "gists_url",
+            "starred_url",
+            "subscriptions_url",
+            "organizations_url",
+            "repos_url",
+            "events_url",
+            "received_events_url",
+        ] {
+            author[field] = "https://example.test/user".into();
+        }
+        let mut pr = serde_json::json!({
+            "url": "https://example.test/pr", "id": number, "number": number,
+            "html_url": "https://example.test/pr", "title": "Test PR", "user": author,
+            "created_at": "2026-01-01T00:00:00Z", "draft": false,
+            "head": {"ref": "feature", "sha": "abc", "label": "feature"},
+            "base": {"ref": "main", "sha": "abc"}
+        });
+        if details {
+            pr["additions"] = 12.into();
+            pr["deletions"] = 3.into();
+        }
+        pr
+    }
+
+    #[tokio::test]
+    async fn shared_transport_keeps_pagination_and_detail_enrichment() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}/", listener.local_addr().unwrap());
+        let next = format!("{base}repos/example/demo/pulls?page=2");
+        let server = tokio::spawn(async move {
+            let mut routes = Vec::new();
+            for _ in 0..4 {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let request = read_headers(&mut socket).await;
+                let route = request.split_whitespace().nth(1).unwrap().to_string();
+                let detail = route.contains("/pulls/");
+                let number = if route.contains("page=2") || route.contains("/pulls/2") {
+                    2
+                } else {
+                    1
+                };
+                let body = if detail {
+                    pr(number, true).to_string()
+                } else {
+                    serde_json::json!([pr(number, false)]).to_string()
+                };
+                let link = if !detail && number == 1 {
+                    format!("Link: <{next}>; rel=\"next\"\r\n")
+                } else {
+                    String::new()
+                };
+                let response = format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n{link}Connection: close\r\n\r\n{body}", body.len());
+                socket.write_all(response.as_bytes()).await.unwrap();
+                routes.push(route);
+            }
+            routes
+        });
+        let transport = ReviewClient {
+            client: Octocrab::builder().base_uri(base).unwrap().build().unwrap(),
+            limiter: Arc::new(tokio::sync::Semaphore::new(8)),
+            strict: true,
+        };
+        let reviews = fetch_my_open_prs_with_client(
+            &transport,
+            "example",
+            &["demo".into()],
+            "teammate",
+            true,
+            &[],
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(reviews.len(), 2);
+        assert!(reviews
+            .iter()
+            .all(|pr| pr.additions == 12 && pr.deletions == 3));
+        let routes = server.await.unwrap();
+        assert!(routes.iter().any(|route| route.contains("page=2")));
+        assert!(routes.iter().any(|route| route.contains("/pulls/1")));
+        assert!(routes.iter().any(|route| route.contains("/pulls/2")));
+    }
+
+    #[tokio::test]
+    async fn tui_reports_repository_errors_instead_of_caching_an_empty_success() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}/", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let _request = read_headers(&mut socket).await;
+            let body = r#"{"message":"Not Found","documentation_url":"https://example.test/docs"}"#;
+            socket.write_all(format!("HTTP/1.1 404 Not Found\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
+        });
+        let transport = ReviewClient {
+            client: Octocrab::builder().base_uri(base).unwrap().build().unwrap(),
+            limiter: Arc::new(tokio::sync::Semaphore::new(8)),
+            strict: true,
+        };
+        assert!(fetch_my_open_prs_with_client(
+            &transport,
+            "example",
+            &["demo".into()],
+            "teammate",
+            true,
+            &[],
+            None
+        )
+        .await
+        .is_err());
+        server.await.unwrap();
+    }
 }

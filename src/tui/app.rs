@@ -1,10 +1,12 @@
-use crate::cache::{CacheKey, CacheKeyBuilder, PrCache};
 use crate::config::Config;
-use crate::github::{fetch_my_open_prs, fetch_pending_reviews, PendingReview};
+use crate::github::{
+    fetch_my_open_prs_with_client, fetch_pending_reviews_with_client, PendingReview, ReviewClient,
+};
 use anyhow::Result;
 use chrono::DateTime;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::future::Future;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::task::JoinSet;
 
@@ -70,7 +72,7 @@ pub struct App {
     /// Configuration loaded from file or environment
     pub config: Config,
     /// List of pending reviews to display
-    pub reviews: Vec<PendingReview>,
+    pub reviews: Arc<[PendingReview]>,
     /// Currently selected PR index in the list
     pub selected_pr: usize,
     /// Current tab/active command
@@ -97,8 +99,8 @@ pub struct App {
     pub selected_action: usize,
     /// Spinner animation frame
     pub spinner_frame: usize,
-    /// Cache for storing PR data
-    pub cache: PrCache,
+    snapshots: HashMap<Tab, Snapshot>,
+    transport: ReviewClient,
     /// Current filtered indices (cached for performance)
     pub filtered_indices: Vec<usize>,
     /// Current position in filtered list
@@ -106,6 +108,12 @@ pub struct App {
     pub(crate) loads: JoinSet<(Tab, Result<Vec<PendingReview>>)>,
     pending: HashSet<Tab>,
     last_attempt: Option<Instant>,
+}
+
+struct Snapshot {
+    reviews: Arc<[PendingReview]>,
+    fetched_at: DateTime<chrono::Utc>,
+    loaded_at: Instant,
 }
 
 /// Represents a tab/command in the left sidebar
@@ -166,9 +174,11 @@ impl App {
 
         // Create app with empty reviews and loading state
         // The actual data fetch will happen in the first refresh
+        let transport = ReviewClient::new(&config.github_token, true);
         Ok(Self {
             config,
-            reviews: vec![],
+            transport,
+            reviews: Arc::from([]),
             selected_pr: 0,
             active_tab: Tab::PendingReviews,
             tabs,
@@ -182,7 +192,7 @@ impl App {
             show_action_menu: false,
             selected_action: 0,
             spinner_frame: 0,
-            cache: PrCache::with_ttl(60), // 1 minute TTL
+            snapshots: HashMap::new(),
             filtered_indices: vec![],
             filtered_position: 0,
             loads: JoinSet::new(),
@@ -191,119 +201,51 @@ impl App {
         })
     }
 
-    /// Fetch reviews based on current tab
-    pub async fn fetch_reviews_for_tab(
-        config: &Config,
-        tab: &Tab,
-        crew_members: &[String],
-    ) -> Result<Vec<PendingReview>> {
+    /// Views with identical filters share a snapshot and an in-flight request.
+    fn dataset(&self, tab: Tab) -> Tab {
         match tab {
-            Tab::PendingReviews => {
-                // Fetch PRs where user is requested as reviewer (exclude own PRs, exclude drafts)
-                fetch_pending_reviews(
-                    &config.github_token,
-                    &config.github_org,
-                    &config.github_repos,
-                    &config.github_username,
-                    &config.github_teams,
-                    false, // include_mine - don't include own PRs
-                    false, // include_drafts
-                    &config.exclude_prefix,
-                    crew_members,
-                    config.max_pr_age_days,
-                )
-                .await
-            }
-            Tab::MyPullRequests => {
-                // Fetch PRs authored by the current user
-                fetch_my_open_prs(
-                    &config.github_token,
-                    &config.github_org,
-                    &config.github_repos,
-                    &config.github_username,
-                    true, // include_drafts
-                    &config.exclude_prefix,
-                    config.max_pr_age_days,
-                )
-                .await
-            }
-            Tab::Crew => {
-                // Fetch PRs from crew members only (uses crew_members from parameter)
-                fetch_pending_reviews(
-                    &config.github_token,
-                    &config.github_org,
-                    &config.github_repos,
-                    &config.github_username,
-                    &config.github_teams,
-                    false,
-                    false,
-                    &config.exclude_prefix,
-                    crew_members,
-                    config.max_pr_age_days,
-                )
-                .await
-            }
-            Tab::Statistics => {
-                // For stats, fetch all pending reviews
-                fetch_pending_reviews(
-                    &config.github_token,
-                    &config.github_org,
-                    &config.github_repos,
-                    &config.github_username,
-                    &config.github_teams,
-                    false,
-                    false,
-                    &config.exclude_prefix,
-                    crew_members,
-                    config.max_pr_age_days,
-                )
-                .await
-            }
-            Tab::MonitorLive => {
-                // Monitor Live always fetches fresh data - PRs needing review
-                fetch_pending_reviews(
-                    &config.github_token,
-                    &config.github_org,
-                    &config.github_repos,
-                    &config.github_username,
-                    &config.github_teams,
-                    false,
-                    false,
-                    &config.exclude_prefix,
-                    crew_members,
-                    config.max_pr_age_days,
-                )
-                .await
-            }
+            Tab::Statistics | Tab::MonitorLive => Tab::PendingReviews,
+            Tab::Crew if self.config.crew_members.is_empty() => Tab::PendingReviews,
+            _ => tab,
         }
     }
 
-    /// Generate a cache key for the current tab and config
-    fn cache_key_for(&self, tab: Tab) -> CacheKey {
-        let crew_members: Vec<String> = match tab {
-            Tab::Crew => self.config.crew_members.clone(),
-            _ => vec![],
-        };
-
-        let tab_type = match tab {
-            Tab::PendingReviews => "pending_reviews",
-            Tab::MyPullRequests => "my_prs",
-            Tab::Crew => "crew",
-            Tab::Statistics => "statistics",
-            Tab::MonitorLive => "monitor_live",
-        };
-
-        CacheKeyBuilder::new()
-            .org(&self.config.github_org)
-            .repos(&self.config.github_repos)
-            .username(&self.config.github_username)
-            .tab_type(tab_type)
-            .include_mine(false) // this varies by tab, handled in fetch
-            .include_drafts(false) // this varies by tab, handled in fetch
-            .exclude_prefixes(&self.config.exclude_prefix)
-            .crew_members(&crew_members)
-            .max_age_days(self.config.max_pr_age_days)
-            .build()
+    async fn fetch_reviews_for_tab(
+        transport: &ReviewClient,
+        config: &Config,
+        tab: Tab,
+    ) -> Result<Vec<PendingReview>> {
+        if tab == Tab::MyPullRequests {
+            fetch_my_open_prs_with_client(
+                transport,
+                &config.github_org,
+                &config.github_repos,
+                &config.github_username,
+                true,
+                &config.exclude_prefix,
+                config.max_pr_age_days,
+            )
+            .await
+        } else {
+            let crew = if tab == Tab::Crew {
+                config.crew_members.as_slice()
+            } else {
+                &[]
+            };
+            fetch_pending_reviews_with_client(
+                transport,
+                &config.github_org,
+                &config.github_repos,
+                &config.github_username,
+                &config.github_teams,
+                false,
+                false,
+                &config.exclude_prefix,
+                crew,
+                config.max_pr_age_days,
+            )
+            .await
+        }
     }
 
     /// Schedule a load without awaiting the network in the input loop.
@@ -318,37 +260,38 @@ impl App {
     }
 
     async fn request_tab(&mut self, tab: Tab, force: bool) {
-        if tab == self.active_tab {
+        let dataset = self.dataset(tab);
+        let active = dataset == self.dataset(self.active_tab);
+        if active {
             self.error = None;
             self.info = None;
         }
-        let key = self.cache_key_for(tab);
-        if !force && tab != Tab::MonitorLive {
-            if let Some(reviews) = self.cache.get(&key).await {
-                if tab == self.active_tab {
-                    self.set_reviews(reviews);
-                    self.loading = self.pending.contains(&tab);
-                    self.last_attempt = Some(Instant::now());
-                }
+        if let Some(snapshot) = self.snapshots.get(&dataset) {
+            let reviews = snapshot.reviews.clone();
+            let fetched_at = snapshot.fetched_at;
+            let loaded_at = snapshot.loaded_at;
+            if active {
+                self.set_reviews(reviews);
+                self.last_refresh = Some(fetched_at);
+                self.last_attempt = Some(loaded_at);
+                self.loading = self.pending.contains(&dataset);
+            }
+            if !force && tab != Tab::MonitorLive && loaded_at.elapsed() < Duration::from_secs(60) {
                 return;
             }
         }
-        if tab == self.active_tab {
+        if active {
             self.loading = true;
         }
-        if self.pending.contains(&tab) {
+        if self.pending.contains(&dataset) {
             return;
         }
         let config = self.config.clone();
-        let crew = if tab == Tab::Crew {
-            config.crew_members.clone()
-        } else {
-            vec![]
-        };
-        self.start_load(tab, async move {
+        let transport = self.transport.clone();
+        self.start_load(dataset, async move {
             tokio::time::timeout(
                 Duration::from_secs(30),
-                Self::fetch_reviews_for_tab(&config, &tab, &crew),
+                Self::fetch_reviews_for_tab(&transport, &config, dataset),
             )
             .await
             .map_err(|_| anyhow::anyhow!("GitHub load timed out. Press r to retry."))?
@@ -366,26 +309,34 @@ impl App {
 
     pub(crate) async fn finish_load(&mut self, tab: Tab, result: Result<Vec<PendingReview>>) {
         self.pending.remove(&tab);
+        let active = tab == self.dataset(self.active_tab);
         match result {
             Ok(reviews) => {
-                self.cache
-                    .set(self.cache_key_for(tab), reviews.clone())
-                    .await;
-                if tab == self.active_tab {
+                let reviews: Arc<[PendingReview]> = reviews.into();
+                let fetched_at = chrono::Utc::now();
+                self.snapshots.insert(
+                    tab,
+                    Snapshot {
+                        reviews: reviews.clone(),
+                        fetched_at,
+                        loaded_at: Instant::now(),
+                    },
+                );
+                if active {
                     self.set_reviews(reviews);
-                    self.last_refresh = Some(chrono::Utc::now());
+                    self.last_refresh = Some(fetched_at);
                 }
             }
-            Err(error) if tab == self.active_tab => self.error = Some(format!("{error:#}")),
+            Err(error) if active => self.error = Some(format!("{error:#}")),
             Err(_) => {}
         }
-        if tab == self.active_tab {
+        if active {
             self.loading = false;
             self.last_attempt = Some(Instant::now());
         }
     }
 
-    fn set_reviews(&mut self, reviews: Vec<PendingReview>) {
+    fn set_reviews(&mut self, reviews: Arc<[PendingReview]>) {
         let selected = self
             .selected_pr_item()
             .map(|pr| (pr.repo.clone(), pr.pr_number));
@@ -402,12 +353,7 @@ impl App {
 
     /// Each tab becomes usable as soon as its own load completes.
     pub async fn preload_all_tabs(&mut self) -> Result<()> {
-        for tab in [
-            Tab::PendingReviews,
-            Tab::MyPullRequests,
-            Tab::Crew,
-            Tab::Statistics,
-        ] {
+        for tab in [Tab::PendingReviews, Tab::MyPullRequests, Tab::Crew] {
             self.request_tab(tab, false).await;
         }
         Ok(())
@@ -486,7 +432,7 @@ impl App {
     pub fn set_active_tab(&mut self, index: usize) {
         if index < self.tabs.len() && self.active_tab != self.tabs[index] {
             self.active_tab = self.tabs[index];
-            self.reviews.clear();
+            self.reviews = Arc::from([]);
             self.selected_pr = 0;
             self.update_filtered_indices();
             self.last_refresh = None;
@@ -596,7 +542,7 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn failures_keep_existing_data_and_schedule_retry() {
         let mut app = App::new(config(), 30).await.unwrap();
-        app.set_reviews(vec![review(7)]);
+        app.set_reviews(vec![review(7)].into());
         app.start_load(Tab::PendingReviews, async { anyhow::bail!("offline") });
         complete(&mut app).await;
         assert_eq!(app.reviews[0].pr_number, 7);
@@ -617,12 +563,58 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn selection_survives_reordering_and_shrinking_results() {
         let mut app = App::new(config(), 30).await.unwrap();
-        app.set_reviews(vec![review(1), review(2), review(3)]);
+        app.set_reviews(vec![review(1), review(2), review(3)].into());
         app.next_pr();
-        app.set_reviews(vec![review(2), review(1)]);
+        app.set_reviews(vec![review(2), review(1)].into());
         assert_eq!(app.selected_pr_item().unwrap().pr_number, 2);
-        app.set_reviews(vec![]);
+        app.set_reviews(Arc::from([]));
         assert!(app.selected_pr_item().is_none());
         assert!(app.filtered_indices.is_empty());
+    }
+    #[tokio::test]
+    async fn related_views_share_in_flight_load_and_completed_snapshot() {
+        let mut app = App::new(config(), 30).await.unwrap();
+        let (send, receive) = tokio::sync::oneshot::channel();
+        app.start_load(Tab::PendingReviews, async move { Ok(receive.await?) });
+        app.set_active_tab(3);
+        app.refresh().await.unwrap();
+        app.set_active_tab(4);
+        app.refresh().await.unwrap();
+        assert_eq!(app.loads.len(), 1);
+        send.send(vec![review(7)]).unwrap();
+        complete(&mut app).await;
+        let shared = app.reviews.clone();
+        app.set_active_tab(0);
+        app.refresh().await.unwrap();
+        assert!(Arc::ptr_eq(&shared, &app.reviews));
+        assert!(app.loads.is_empty());
+        assert!(app.last_refresh.is_some());
+    }
+
+    #[tokio::test]
+    async fn preloads_are_published_independently_and_live_is_not_preloaded() {
+        let mut app = App::new(config(), 30).await.unwrap();
+        app.start_load(Tab::Crew, std::future::pending());
+        app.start_load(Tab::PendingReviews, async { Ok(vec![review(7)]) });
+        complete(&mut app).await;
+        assert_eq!(app.reviews[0].pr_number, 7);
+        assert_eq!(app.loads.len(), 1);
+        app.preload_all_tabs().await.unwrap();
+        assert_eq!(app.loads.len(), 2); // Crew and My PRs only.
+    }
+
+    #[tokio::test]
+    async fn expired_snapshots_stay_visible_while_refreshing() {
+        let mut app = App::new(config(), 30).await.unwrap();
+        app.finish_load(Tab::PendingReviews, Ok(vec![review(7)]))
+            .await;
+        app.snapshots
+            .get_mut(&Tab::PendingReviews)
+            .unwrap()
+            .loaded_at = Instant::now() - Duration::from_secs(61);
+        app.refresh().await.unwrap();
+        assert_eq!(app.reviews[0].pr_number, 7);
+        assert!(app.loading);
+        assert_eq!(app.loads.len(), 1);
     }
 }
