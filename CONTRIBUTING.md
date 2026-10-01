@@ -6,7 +6,7 @@ Thank you for your interest in contributing to PRCtrl! This document provides gu
 
 ### Prerequisites
 
-- Rust 1.70+ ([Install via rustup](https://rustup.rs/))
+- Latest stable Rust ([Install via rustup](https://rustup.rs/)); a minimum supported Rust version is not currently declared
 - GitHub personal access token (for local testing)
 - macOS (for notification features)
 
