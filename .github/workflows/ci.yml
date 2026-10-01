@@ -6,21 +6,25 @@ on:
   pull_request:
     branches: [main]
 
+# Cargo 1.97+ denies compiler warnings without changing RUSTFLAGS/build caches.
+env:
+  CARGO_BUILD_WARNINGS: deny
+
 jobs:
   check:
     name: Check
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - run: cargo check --all-targets
+      - uses: dtolnay/rust-toolchain@1.99.0
+      - run: cargo check --all-targets --locked
 
   fmt:
     name: Format
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.99.0
         with:
           components: rustfmt
       - run: cargo fmt --all -- --check
@@ -30,32 +34,32 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.99.0
         with:
           components: clippy
-      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo clippy --all-targets --locked -- -D warnings
 
   test:
     name: Test
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - run: cargo test
+      - uses: dtolnay/rust-toolchain@1.99.0
+      - run: cargo test --locked
 
   build:
     name: Build
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - run: cargo build --release
+      - uses: dtolnay/rust-toolchain@1.99.0
+      - run: cargo build --release --locked
 
   package:
     name: Package
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.99.0
       - run: cargo package --list --locked
       - run: cargo publish --dry-run --locked

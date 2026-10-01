@@ -2032,7 +2032,6 @@ dependencies = [
  "dotenvy",
  "futures",
  "octocrab",
- "once_cell",
  "open",
  "ratatui",
  "regex",

@@ -1,8 +1,7 @@
 use crate::github::PendingReview;
 use chrono::{DateTime, Duration, Utc};
-use once_cell::sync::Lazy;
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 use tokio::sync::RwLock;
 
 /// Cache key for identifying cached data
@@ -219,4 +218,4 @@ impl Default for PrCache {
 }
 
 // Global cache instance for convenience
-pub static GLOBAL_CACHE: Lazy<PrCache> = Lazy::new(|| PrCache::with_ttl(60));
+pub static GLOBAL_CACHE: LazyLock<PrCache> = LazyLock::new(|| PrCache::with_ttl(60));

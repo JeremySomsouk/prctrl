@@ -6,7 +6,7 @@ Thank you for your interest in contributing to PRCtrl! This document provides gu
 
 ### Prerequisites
 
-- Latest stable Rust ([Install via rustup](https://rustup.rs/)); a minimum supported Rust version is not currently declared
+- Rust 1.99 or newer ([Install via rustup](https://rustup.rs/)); `rust-toolchain.toml` pins development to 1.99.0
 - GitHub personal access token (for local testing)
 - macOS (for notification features)
 
