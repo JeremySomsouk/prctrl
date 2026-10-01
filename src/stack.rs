@@ -1,6 +1,14 @@
 use anyhow::Result;
 use futures::future::join_all;
 use std::collections::{HashMap, HashSet};
+use std::sync::LazyLock;
+
+static TICKET_KEY: LazyLock<regex::Regex> = LazyLock::new(|| {
+    regex::Regex::new(r"(?i)\b([A-Z][A-Z0-9]*-\d+)\b").expect("valid ticket-key regex")
+});
+static POSITION_INDEX: LazyLock<regex::Regex> = LazyLock::new(|| {
+    regex::Regex::new(r"[\[\(](\d+)/(\d+)[\]\)]").expect("valid position-index regex")
+});
 
 #[derive(Clone, Debug, serde::Serialize)]
 pub struct StackedPR {
@@ -82,11 +90,27 @@ pub async fn detect_stacks(
     }
     stacks.extend(convention_stacks);
 
+    // HashMap iteration order must not change the displayed stacks or --limit results.
+    sort_stacks(&mut stacks);
     if let Some(l) = limit {
         stacks.truncate(l as usize);
     }
 
     Ok(stacks)
+}
+
+fn sort_stacks(stacks: &mut [Stack]) {
+    stacks.sort_by(|a, b| {
+        a.repo
+            .cmp(&b.repo)
+            .then_with(|| a.base_branch.cmp(&b.base_branch))
+            .then_with(|| {
+                a.prs
+                    .first()
+                    .map(|p| p.number)
+                    .cmp(&b.prs.first().map(|p| p.number))
+            })
+    });
 }
 
 /// Detect stacks where PR B's base SHA equals PR A's head SHA.
@@ -335,16 +359,14 @@ fn detect_branch_chain_stacks(
 
 /// Extract a ticket key from a branch name or title.
 fn extract_ticket_key(s: &str) -> Option<String> {
-    let re = regex::Regex::new(r"(?i)\b([A-Z][A-Z0-9]*-\d+)\b").ok()?;
-    let caps = re.captures(s)?;
+    let caps = TICKET_KEY.captures(s)?;
     let key = caps.get(1)?.as_str().to_uppercase();
     Some(key)
 }
 
 /// Extract the position index from title markers like [1/3], (2/5), [3/3], etc.
 fn extract_position_index(title: &str) -> Option<usize> {
-    let re = regex::Regex::new(r"[\[\(](\d+)/(\d+)[\]\)]").ok()?;
-    let caps = re.captures(title)?;
+    let caps = POSITION_INDEX.captures(title)?;
     caps.get(1)?.as_str().parse::<usize>().ok()
 }
 
@@ -547,4 +569,38 @@ pub fn render_stacks_tree(stacks: &[Stack]) -> String {
     }
 
     output
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn convention_extractors_preserve_matching_rules() {
+        assert_eq!(
+            extract_ticket_key("refactor(proj-123): extract [1/3]"),
+            Some("PROJ-123".into())
+        );
+        assert_eq!(extract_ticket_key("just-a-branch"), None);
+        assert_eq!(extract_position_index("part (2/5)"), Some(2));
+        assert_eq!(extract_position_index("no marker"), None);
+    }
+
+    #[test]
+    fn stack_order_does_not_depend_on_group_iteration() {
+        let mut stacks = vec![
+            build_stack("z-repo", "main", vec![], StackKind::Convention),
+            build_stack("a-repo", "release", vec![], StackKind::BranchChain),
+            build_stack("a-repo", "main", vec![], StackKind::CommitChain),
+        ];
+        sort_stacks(&mut stacks);
+        let expected = render_stacks(&stacks);
+        stacks.reverse();
+        sort_stacks(&mut stacks);
+        assert_eq!(render_stacks(&stacks), expected);
+        assert_eq!(
+            (&*stacks[0].repo, &*stacks[0].base_branch),
+            ("a-repo", "main")
+        );
+    }
 }

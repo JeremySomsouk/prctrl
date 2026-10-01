@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Performance
+- Compile stack convention regexes once with `LazyLock` instead of rebuilding them for every match and sort comparison.
+
+### Fixed
+- Sort detected stacks deterministically before applying `--limit`, avoiding randomized group iteration in output and selected results.
+
+### Changed
+- Deny compiler warnings in CI using Cargo 1.97’s `CARGO_BUILD_WARNINGS`, alongside strict Clippy checks.
+- Require Rust 1.99 and pin development and CI to 1.99.0 with locked dependency resolution.
+- Use the standard library `LazyLock` for the global PR cache instead of a direct `once_cell` dependency.
+- Decode owned Claude CLI output with Rust 1.99’s `String::from_utf8_lossy_owned`, reusing valid UTF-8 storage and trimming in place.
+
 ## [2.2.0] - 2026-10-01
 
 ### Performance

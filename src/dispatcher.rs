@@ -82,8 +82,16 @@ pub fn delegate_to_claude(
         anyhow::bail!("claude CLI failed: {}", stderr.trim());
     }
 
-    let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    Ok(text)
+    Ok(decode_cli_output(output.stdout))
+}
+
+/// Decode owned subprocess output and trim it without copying valid UTF-8.
+fn decode_cli_output(bytes: Vec<u8>) -> String {
+    let mut text = String::from_utf8_lossy_owned(bytes);
+    text.truncate(text.trim_end().len());
+    let start = text.len() - text.trim_start().len();
+    text.drain(..start);
+    text
 }
 
 /// Check if a monitor process is already running
@@ -475,4 +483,24 @@ pub async fn monitor_new_prs(
     // Clean up when exiting normally
     let _ = remove_pid_file();
     Ok(())
+}
+
+#[cfg(test)]
+mod output_tests {
+    use super::decode_cli_output;
+
+    #[test]
+    fn decodes_cli_output_without_losing_content() {
+        assert_eq!(
+            decode_cli_output(b"  review\nnext line\r\n".to_vec()),
+            "review\nnext line"
+        );
+        assert_eq!(
+            decode_cli_output("\u{2003}review\u{a0}".as_bytes().to_vec()),
+            "review"
+        );
+        assert_eq!(decode_cli_output(vec![b' ', 0xff, b'\n']), "\u{fffd}");
+        assert_eq!(decode_cli_output(b" \r\n\t".to_vec()), "");
+        assert_eq!(decode_cli_output(Vec::new()), "");
+    }
 }
