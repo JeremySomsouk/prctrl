@@ -8,7 +8,7 @@ PRCtrl helps engineering teams manage PR reviews efficiently. Monitor incoming P
 
 [![crates.io](https://img.shields.io/crates/v/prctrl.svg)](https://crates.io/crates/prctrl)
 [![crates.io](https://img.shields.io/crates/d/prctrl.svg)](https://crates.io/crates/prctrl)
-![Rust](https://img.shields.io/badge/Rust-1.70+-orange.svg)
+![Rust](https://img.shields.io/badge/Rust-stable-orange.svg)
 ![macOS](https://img.shields.io/badge/macOS-native-blue.svg)
 ![License](https://img.shields.io/badge/License-MIT-green.svg)
 [![Docs](https://img.shields.io/badge/Documentation-Online-blue.svg)](https://jeremysomsouk.github.io/prctrl/)
@@ -61,7 +61,7 @@ cargo install --git https://github.com/JeremySomsouk/prctrl
 ```
 
 ### Requirements
-- Rust 1.70+
+- Latest stable Rust (tested in CI; a minimum supported Rust version is not currently declared)
 - GitHub personal access token (read access to PRs)
 - macOS (for native notifications)
 
