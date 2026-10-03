@@ -7,13 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.2.1] - 2026-10-04
+
 ### Performance
 - Compile stack convention regexes once with `LazyLock` instead of rebuilding them for every match and sort comparison.
 
 ### Fixed
+- Allow `config init` to populate an existing empty configuration file without `--force`.
+- Default an omitted or blank repository owner to the configured GitHub username for personal repositories.
 - Sort detected stacks deterministically before applying `--limit`, avoiding randomized group iteration in output and selected results.
 
 ### Changed
+- Launch the TUI when `prctrl` is called without a subcommand, using the same refresh defaults as `prctrl tui`.
+- Clarify the optional repository owner prompt and document OS configuration paths and quoted macOS editor commands.
 - Deny compiler warnings in CI using Cargo 1.97’s `CARGO_BUILD_WARNINGS`, alongside strict Clippy checks.
 - Require Rust 1.99 and pin development and CI to 1.99.0 with locked dependency resolution.
 - Use the standard library `LazyLock` for the global PR cache instead of a direct `once_cell` dependency.

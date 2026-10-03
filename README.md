@@ -47,7 +47,7 @@ prctrl config init
 prctrl list
 
 # Launch Terminal UI mode
-prctrl tui
+prctrl
 
 # Monitor for new PRs (background)
 prctrl monitor
@@ -73,12 +73,21 @@ Run the interactive setup to configure PRCtrl:
 prctrl config init
 ```
 
-This creates a config file at `~/.prctrl/config.toml` with your GitHub settings.
+This creates a config file in your OS configuration directory with your GitHub settings.
+On macOS, the path is `~/Library/Application Support/prctrl/config.toml`.
+Empty files can be initialized directly; use `prctrl config init --force` to replace a file with content.
+Leave the repository owner (`org`) empty or omit it to monitor your personal repositories.
+Set it to an organization or another username to monitor that owner's repositories.
+Quote paths containing spaces when opening the file:
+
+```bash
+vim "$HOME/Library/Application Support/prctrl/config.toml"
+```
 
 **Example configuration:**
 
 ```toml
-# ~/.prctrl/config.toml
+# config.toml
 
 [github]
 token = "ghp_xxxxxxxxxxxxxxxxxxxx"
@@ -131,7 +140,7 @@ Instead of a config file, you can use environment variables:
 |----------|-------------|
 | `PRCTRL_GITHUB_TOKEN` | GitHub personal access token |
 | `PRCTRL_GITHUB_USERNAME` | Your GitHub username |
-| `PRCTRL_GITHUB_ORG` | GitHub organization name |
+| `PRCTRL_GITHUB_ORG` | Repository owner (defaults to your GitHub username when unset or blank) |
 | `PRCTRL_GITHUB_REPOS` | Repos to monitor (comma-separated) |
 | `PRCTRL_GITHUB_TEAMS` | Teams to filter (optional) |
 | `PRCTRL_ANTHROPIC_API_KEY` | For Claude integration (optional) |
@@ -148,7 +157,7 @@ Instead of a config file, you can use environment variables:
 | `prctrl delegate [pr]` | AI triage with Claude |
 | `prctrl chat` | Interactive chat with Claude |
 | `prctrl monitor` | Background monitoring |
-| `prctrl tui` | **Terminal UI mode** (interactive) |
+| `prctrl` / `prctrl tui` | **Terminal UI mode** (interactive) |
 | `prctrl approve <pr>` | Quick approve |
 | `prctrl chase <pr>` | Follow up stale PRs |
 | `prctrl stats` | Team review metrics |

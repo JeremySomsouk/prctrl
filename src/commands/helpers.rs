@@ -363,7 +363,7 @@ pub fn get_config_path() -> std::path::PathBuf {
 pub fn run_config_init(force: bool) -> anyhow::Result<()> {
     let config_path = get_config_path();
 
-    if config_path.exists() && !force {
+    if !force && config_path.exists() && std::fs::metadata(&config_path)?.len() > 0 {
         println!("\n⚠️  Config already exists at {:?}", config_path);
         println!("   Use --force to overwrite");
         return Ok(());
@@ -390,7 +390,7 @@ pub fn run_config_init(force: bool) -> anyhow::Result<()> {
     io::stdin().read_line(&mut github_username)?;
     github_username = github_username.trim().to_string();
 
-    print!("🏢 GitHub Organization: ");
+    print!("🏢 Repository owner (optional, defaults to your username): ");
     io::stdout().flush()?;
     io::stdin().read_line(&mut github_org)?;
     github_org = github_org.trim().to_string();
