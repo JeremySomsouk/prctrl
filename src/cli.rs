@@ -1,11 +1,14 @@
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
+const DEFAULT_TUI_INTERVAL: u64 = 30;
+
 #[derive(Parser, Debug)]
 #[command(
     name = "prctrl",
     version,
     about = "Terminal-native GitHub PR management. Stay on top of code reviews without leaving your terminal.",
+    after_help = "Run prctrl without a subcommand to launch the TUI.",
     author = "Jeremy Somsouk <jeremy@somsouk.fr>"
 )]
 pub struct Cli {
@@ -51,7 +54,15 @@ pub struct Cli {
     pub pr: Option<u64>,
 
     #[command(subcommand)]
-    pub command: Commands,
+    pub command: Option<Commands>,
+}
+
+impl Default for Commands {
+    fn default() -> Self {
+        Self::Tui {
+            interval: DEFAULT_TUI_INTERVAL,
+        }
+    }
 }
 
 #[derive(Subcommand, Debug)]
@@ -266,7 +277,7 @@ pub enum Commands {
     /// Launch the Terminal User Interface
     Tui {
         /// Refresh interval in seconds; 0 disables automatic refresh (default: 30)
-        #[arg(long, short = 'i', default_value_t = 30)]
+        #[arg(long, short = 'i', default_value_t = DEFAULT_TUI_INTERVAL)]
         interval: u64,
     },
     /// Show diff/stats for a specific PR directly in terminal

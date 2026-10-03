@@ -5,7 +5,8 @@ Browse pull requests in a responsive terminal review desk.
 ![Review desk with synthetic example data](../assets/tui-review-desk.png)
 
 ```bash
-prctrl tui
+prctrl                      # Launch the default TUI
+prctrl tui                  # Explicit equivalent
 prctrl tui --interval 60
 prctrl tui --interval 0
 NO_COLOR=1 prctrl tui

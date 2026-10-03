@@ -93,27 +93,30 @@ pub fn reviews_dir() -> PathBuf {
 /// `list --pr/--pr-numbers` paths that resolve PRs by number directly. Defaults
 /// to `true` for everything else so we never skip a fetch a command depends on.
 fn command_needs_prefetch(cli: &Cli) -> bool {
-    match &cli.command {
+    match cli.command.as_ref() {
         // Self-sufficient commands: they fetch (or don't need) data on their own.
-        Commands::Tui { .. }
-        | Commands::Monitor { .. }
-        | Commands::MonitorStop
-        | Commands::MonitorStatus
-        | Commands::Clean { .. } => false,
+        None
+        | Some(
+            Commands::Tui { .. }
+            | Commands::Monitor { .. }
+            | Commands::MonitorStop
+            | Commands::MonitorStatus
+            | Commands::Clean { .. },
+        ) => false,
         // `list` with explicit PR target fetches by number and ignores ctx.reviews.
-        Commands::List {
+        Some(Commands::List {
             pr_numbers: Some(_),
             ..
-        }
-        | Commands::List { pr: Some(_), .. } => false,
-        Commands::List { .. } if cli.pr.is_some() => false,
+        })
+        | Some(Commands::List { pr: Some(_), .. }) => false,
+        Some(Commands::List { .. }) if cli.pr.is_some() => false,
         _ => true,
     }
 }
 
 /// Dispatch to the appropriate command handler based on the CLI command.
 pub async fn dispatch(ctx: CommandContext) -> anyhow::Result<()> {
-    match ctx.cli.command {
+    match ctx.cli.command.unwrap_or_default() {
         Commands::List {
             json,
             since_days,
@@ -14920,4 +14923,28 @@ pub async fn dispatch(ctx: CommandContext) -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::command_needs_prefetch;
+    use crate::cli::Cli;
+    use clap::Parser;
+
+    #[test]
+    fn default_tui_skips_eager_review_fetch() {
+        std::thread::Builder::new()
+            .stack_size(8 * 1024 * 1024)
+            .spawn(|| {
+                for args in [vec!["prctrl"], vec!["prctrl", "tui"]] {
+                    assert!(!command_needs_prefetch(&Cli::try_parse_from(args).unwrap()));
+                }
+                assert!(command_needs_prefetch(
+                    &Cli::try_parse_from(["prctrl", "list"]).unwrap()
+                ));
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
 }

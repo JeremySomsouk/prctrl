@@ -83,16 +83,13 @@ impl Config {
             anyhow::bail!("Set PRCTRL_GITHUB_USERNAME or run `prctrl config init`");
         };
 
-        // Required: org
-        let github_org = if let Ok(v) = std::env::var("PRCTRL_GITHUB_ORG") {
-            v
-        } else if let Ok(v) = std::env::var("GITHUB_ORG") {
-            v
-        } else if let Some(ref t) = toml {
-            get_toml_str(t, "org").ok_or_else(|| anyhow::anyhow!("missing github.org in config"))?
-        } else {
-            anyhow::bail!("Set PRCTRL_GITHUB_ORG or run `prctrl config init`");
-        };
+        // Optional repository owner: personal repositories use the username by default.
+        let github_org = std::env::var("PRCTRL_GITHUB_ORG")
+            .ok()
+            .or_else(|| std::env::var("GITHUB_ORG").ok())
+            .or_else(|| toml.as_ref().and_then(|t| get_toml_str(t, "org")))
+            .filter(|owner| !owner.trim().is_empty())
+            .unwrap_or_else(|| github_username.clone());
 
         // Optional: repos
         let github_repos = if let Ok(v) = std::env::var("PRCTRL_GITHUB_REPOS") {

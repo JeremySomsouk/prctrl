@@ -8,7 +8,7 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     // Handle config commands without requiring env vars
-    if let Commands::Config { action } = &cli.command {
+    if let Some(Commands::Config { action }) = &cli.command {
         match action {
             prctrl::cli::ConfigAction::Init { force } => {
                 helpers::run_config_init(*force)?;
