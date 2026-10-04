@@ -45,6 +45,13 @@ pub async fn run_tui(config: Config, refresh_interval: u64) -> Result<()> {
     let mut dirty = true;
     let mut last_second = std::time::Instant::now();
     loop {
+        let selected = if app.loading || app.active_tab == crate::tui::app::Tab::Statistics {
+            None
+        } else {
+            app.selected_pr_item()
+                .map(|pr| (pr.repo.clone(), pr.pr_number))
+        };
+        app.readiness.select(selected);
         if dirty {
             terminal.draw(|frame| Ui::draw(frame, &mut app))?;
             dirty = false;
@@ -68,6 +75,10 @@ pub async fn run_tui(config: Config, refresh_interval: u64) -> Result<()> {
                     Some(Err(error)) => return Err(error.into()),
                     None => {}
                 }
+                dirty = true;
+            }
+            result = app.readiness.loads.join_next(), if !app.readiness.loads.is_empty() => {
+                if let Some(Ok((generation, key, data))) = result { app.readiness.finish(generation, key, data); }
                 dirty = true;
             }
             _ = tick.tick() => {
@@ -146,6 +157,26 @@ async fn handle_key_event(app: &mut App, key: crossterm::event::KeyEvent) -> Res
         }
         return Ok(true);
     }
+    if app.show_readiness {
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('d') => app.show_readiness = false,
+            KeyCode::Down | KeyCode::Char('j') => {
+                app.readiness_scroll = app.readiness_scroll.saturating_add(1)
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                app.readiness_scroll = app.readiness_scroll.saturating_sub(1)
+            }
+            KeyCode::PageDown => app.readiness_scroll = app.readiness_scroll.saturating_add(10),
+            KeyCode::PageUp => app.readiness_scroll = app.readiness_scroll.saturating_sub(10),
+            KeyCode::Home => app.readiness_scroll = 0,
+            KeyCode::Char('r') | KeyCode::Char('R') => {
+                app.readiness_scroll = 0;
+                app.force_refresh().await?;
+            }
+            _ => {}
+        }
+        return Ok(true);
+    }
     if app.show_action_menu {
         match key.code {
             KeyCode::Esc => app.show_action_menu = false,
@@ -199,6 +230,13 @@ async fn handle_key_event(app: &mut App, key: crossterm::event::KeyEvent) -> Res
         }
         KeyCode::Char('r') | KeyCode::Char('R') => app.force_refresh().await?,
         KeyCode::Char('?') => app.show_help = true,
+        KeyCode::Char('d')
+            if app.selected_pr_item().is_some()
+                && app.active_tab != crate::tui::app::Tab::Statistics =>
+        {
+            app.show_readiness = true;
+            app.readiness_scroll = 0;
+        }
         KeyCode::Char('o') if app.active_tab != crate::tui::app::Tab::Statistics => {
             open_selected(app)
         }
@@ -322,5 +360,22 @@ mod tests {
         assert!(app.loading);
         assert_eq!(app.loads.len(), 1);
         assert!(!key(&mut app, KeyCode::Char('q')).await);
+    }
+    #[tokio::test]
+    async fn readiness_focus_captures_navigation_refresh_and_quit() {
+        let mut app = App::new(config(), 0).await.unwrap();
+        app.finish_load(Tab::PendingReviews, Ok(vec![review(1), review(2)]))
+            .await;
+        key(&mut app, KeyCode::Char('d')).await;
+        assert!(app.show_readiness);
+        key(&mut app, KeyCode::Down).await;
+        key(&mut app, KeyCode::Tab).await;
+        assert_eq!(app.selected_pr, 0);
+        assert_eq!(app.readiness_scroll, 1);
+        key(&mut app, KeyCode::Char('r')).await;
+        assert!(app.loading);
+        assert!(!key(&mut app, KeyCode::Char('q')).await);
+        key(&mut app, KeyCode::Esc).await;
+        assert!(!app.show_readiness);
     }
 }

@@ -164,6 +164,15 @@ Instead of a config file, you can use environment variables:
 
 See `prctrl --help` for full command list.
 
+## Explainable readiness (2.3.0)
+
+Use `prctrl ready --json` or press `d` on a selected TUI PR to inspect CI checks,
+review and merge blockers, the observed head commit and UTC time. Both use one
+read-only engine: pending CI blocks readiness, and incomplete evidence stays UNKNOWN.
+GitHub remains authoritative at merge time. The TUI fetches only the settled
+selection and keeps a bounded 60-second cache, so navigation stays responsive.
+See the [ready guide](docs/src/commands/ready.md) for JSON compatibility and limits.
+
 ## Terminal UI Mode (TUI)
 
 A responsive review desk for browsing GitHub pull requests:

@@ -77,6 +77,9 @@ pub struct App {
     pub spinner_frame: usize,
     snapshots: HashMap<Tab, Snapshot>,
     transport: ReviewClient,
+    pub readiness: crate::tui::readiness::ReadinessDesk,
+    pub show_readiness: bool,
+    pub readiness_scroll: u16,
     /// Current filtered indices (cached for performance)
     pub filtered_indices: Vec<usize>,
     /// Current position in filtered list
@@ -152,7 +155,14 @@ impl App {
         // Create app with empty reviews and loading state
         // The actual data fetch will happen in the first refresh
         let transport = ReviewClient::new(&config.github_token, true);
+        let readiness = crate::tui::readiness::ReadinessDesk::new(
+            crate::readiness::ReadinessClient::new(transport.clone()),
+            config.github_org.clone(),
+        );
         Ok(Self {
+            readiness,
+            show_readiness: false,
+            readiness_scroll: 0,
             config,
             transport,
             reviews: Arc::from([]),
@@ -237,6 +247,7 @@ impl App {
     }
 
     pub async fn force_refresh(&mut self) -> Result<()> {
+        self.readiness.invalidate();
         self.request_tab(self.active_tab, true).await;
         Ok(())
     }
@@ -305,6 +316,7 @@ impl App {
                     },
                 );
                 if active {
+                    self.readiness.invalidate();
                     self.set_reviews(reviews);
                     self.last_refresh = Some(fetched_at);
                 }
@@ -674,5 +686,27 @@ pub(crate) mod tests {
         app.update_filtered_indices();
         assert_eq!(app.visible_range(12), 0..0);
         assert!(app.selected_pr_item().is_none());
+    }
+    #[tokio::test]
+    async fn fresh_active_data_and_manual_sync_invalidate_readiness() {
+        let mut app = App::new(config(), 0).await.unwrap();
+        app.finish_load(Tab::PendingReviews, Ok(vec![review(1)]))
+            .await;
+        app.readiness.fixture(
+            ("demo".into(), 1),
+            crate::readiness::Readiness::unknown("fixture"),
+        );
+        app.finish_load(Tab::MyPullRequests, Ok(vec![review(2)]))
+            .await;
+        assert!(app.readiness.observation("demo", 1).is_some());
+        app.finish_load(Tab::PendingReviews, Ok(vec![review(1)]))
+            .await;
+        assert!(app.readiness.observation("demo", 1).is_none());
+        app.readiness.fixture(
+            ("demo".into(), 1),
+            crate::readiness::Readiness::unknown("fixture"),
+        );
+        app.force_refresh().await.unwrap();
+        assert!(app.readiness.observation("demo", 1).is_none());
     }
 }

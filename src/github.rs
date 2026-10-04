@@ -7,21 +7,35 @@ use serde::Serialize;
 /// Shared transport and request budget across TUI datasets.
 #[derive(Clone)]
 pub(crate) struct ReviewClient {
-    client: Octocrab,
+    pub(crate) client: Octocrab,
     limiter: std::sync::Arc<tokio::sync::Semaphore>,
     strict: bool,
 }
 
 impl ReviewClient {
+    #[cfg(test)]
+    pub(crate) fn for_test(base: String) -> Self {
+        Self {
+            client: Octocrab::builder()
+                .base_uri(base)
+                .unwrap()
+                .add_retry_config(octocrab::service::middleware::retry::RetryConfig::None)
+                .build()
+                .unwrap(),
+            limiter: std::sync::Arc::new(tokio::sync::Semaphore::new(8)),
+            strict: true,
+        }
+    }
+
     pub(crate) fn new(token: &str, strict: bool) -> Self {
         Self {
-            client: new_client(token),
+            client: new_client_with_retry(token, !strict),
             limiter: std::sync::Arc::new(tokio::sync::Semaphore::new(8)),
             strict,
         }
     }
 
-    async fn request<T>(
+    pub(crate) async fn request<T>(
         &self,
         request: impl std::future::Future<Output = octocrab::Result<T>>,
     ) -> octocrab::Result<T> {
@@ -41,10 +55,15 @@ impl ReviewClient {
 /// A single client reuses the underlying HTTP connection pool (keep-alive,
 /// TLS session) across all API calls, avoiding repeated handshakes.
 pub fn new_client(token: &str) -> Octocrab {
-    Octocrab::builder()
-        .personal_token(token.to_string())
-        .build()
-        .expect("failed to build GitHub client")
+    new_client_with_retry(token, true)
+}
+
+fn new_client_with_retry(token: &str, automatic_retry: bool) -> Octocrab {
+    let mut builder = Octocrab::builder().personal_token(token.to_string());
+    if !automatic_retry {
+        builder = builder.add_retry_config(octocrab::service::middleware::retry::RetryConfig::None);
+    }
+    builder.build().expect("failed to build GitHub client")
 }
 
 #[derive(Debug, Clone, Serialize)]

@@ -1,149 +1,54 @@
 # ready
 
-**Show PRs that are ready to merge — approved, CI passing, no conflicts.**
-
-A merge-ready PR is one that has:
-- ✅ Not a draft
-- ✅ CI/CD checks passing (or pending)
-- ✅ No merge conflicts
-- ✅ Is mergeable (GitHub says so)
-
-## When to Use
-
-- Morning check: "Which PRs can I merge right now?"
-- Release planning: "What's blocking the merge queue?"
-- Dashboard prep: "Get a quick list of deployable changes"
-- QA handoff: "Verify which PRs are good to go"
-
-## Synopsis
+Explain each PR's readiness using the same read-only engine as the TUI.
 
 ```bash
-prctrl ready [OPTIONS]
-```
-
-## Options
-
-| Flag | Description | Default |
-|------|-------------|---------|
-| `--pr, -p <NUMBER>` | Target a specific PR by number | - |
-| `--pr-numbers <NUMS>` | Check multiple PRs (comma-separated) | - |
-| `--all, -a` | Check all pending reviews | `false` |
-| `--repo <NAME>` | Filter to specific repository (partial match) | All repos |
-| `--author <USER>` | Filter by author username (partial match) | All authors |
-| `--since-days, -s <DAYS>` | Only show PRs created since N days ago | All PRs |
-| `--priority, -P` | Show priority scores (1-5 stars) based on age and size | `false` |
-| `--json` | Output as JSON for scripting | `false` |
-
-## How It Works
-
-The `ready` command analyzes your pending review PRs and checks each one's merge readiness:
-
-1. **Fetches CI status** via GitHub's combined status API
-2. **Checks merge conflicts** using GitHub's mergeable field
-3. **Filters out drafts** (not ready for merge)
-4. **Sorts by age** — oldest mergeable PRs first
-
-A PR is considered "ready to merge" when:
-- `draft = false`
-- `ci_status = "success"` or `"pending"`
-- `mergeable = true` (not `false`)
-- `has_conflicts = false`
-
-## Output
-
-```
-🚀 Merge Readiness — 8 PRs total, 3 ready to merge
-──────────────────────────────────────────────────
-
-  ✅  #4821  Fix authentication bug
-      👤 alice  •  📦 +340/-25  •  ⏱️ 2 days  •  ✅ CI
-      📁 myorg/frontend  🔗 https://github.com/myorg/frontend/pull/4821
-
-  ✅  #4815  Update dependencies
-      👤 bob  •  📦 +50/-10  •  ⏱️ today  •  ✅ CI
-      📁 myorg/shared  🔗 https://github.com/myorg/shared/pull/4815
-
-  ⏳  #4809  Refactor API gateway
-      👤 carol  •  📦 +1200/-200  •  ⏱️ 5 days  •  ⏳ CI pending
-      📁 myorg/backend  🔗 https://github.com/myorg/backend/pull/4809
-
-──────────────────────────────────────────────────
-  💡 Ready = not draft + CI passing + no conflicts
-  💡 Use `--json` for scripting
-```
-
-### With Priority Flag
-
-When `--priority` is enabled, each PR shows its priority score:
-
-```
-🚀 Merge Readiness — 8 PRs total, 3 ready to merge
-──────────────────────────────────────────────────
-
-  ✅  #4821  Fix authentication bug  ⭐⭐⭐⭐
-      👤 alice  •  📦 +340/-25  •  ⏱️ 2 days  •  ✅ CI
-      📁 myorg/frontend  🔗 https://github.com/myorg/frontend/pull/4821
-
-  ✅  #4815  Update dependencies  ⭐
-      👤 bob  •  📦 +50/-10  •  ⏱️ today  •  ✅ CI
-      📁 myorg/shared  🔗 https://github.com/myorg/shared/pull/4815
-
-──────────────────────────────────────────────────
-  💡 Ready = not draft + CI passing + no conflicts
-  💡 Priority based on age and size
-  💡 Use `--json` for scripting
-```
-
-## Examples
-
-```bash
-# Interactive: show all pending PRs with readiness status
 prctrl ready
-
-# Check specific PR by number
-prctrl ready --pr 1234
-
-# Check multiple PRs at once
-prctrl ready --pr-numbers 1234,5678,9012
-
-# Check all pending reviews (non-interactive)
-prctrl ready --all
-
-# Filter to specific repo
-prctrl ready --repo frontend
-
-# Filter by author
-prctrl ready --author alice
-
-# Filter by repo and author combined
-prctrl ready --repo backend --author bob
-
-# Only show PRs from the last 7 days
-prctrl ready --since-days 7
-
-# Only show PRs from today
-prctrl ready --since-days 1
-
-# Show priority scores to identify most urgent ready PRs
-prctrl ready --priority
-
-# JSON output for scripting
-prctrl ready --json
-
-# Combine with other commands
-prctrl ready --repo backend | grep "✅"
+prctrl ready 123
+prctrl ready --pr-numbers 123,456 --json
+prctrl ready --all --repo frontend --author alice --since-days 7 --priority
 ```
 
-## Tips
+`--pr` (including the global flag) takes precedence over positional numbers and
+`--pr-numbers`. Explicit targets bypass the pending-review prefetch. By default,
+this command analyzes pending reviews; `--all` is an explicit synonym.
+Repository and author filters are case-insensitive partial matches.
 
-- Use `--json` for integration with dashboards or automation scripts
-- Pipe to `grep "✅"` to get just the ready PRs
-- Ready PRs are sorted by age — oldest first
-- CI "pending" is counted as ready (in progress, not failed)
-- Combine with `browse` to quickly open merge-ready PRs
+## Evidence and states
 
-## Related Commands
+- **READY**: open, not draft, mergeable, GitHub merge state CLEAN, review policy
+  satisfied, and complete passing CI evidence for the head commit.
+- **BLOCKED**: a definite blocker, such as pending/failing CI, outstanding reviews,
+  changes requested, conflicts, a draft, or a branch behind its base.
+- **UNKNOWN**: missing permissions, network failure, unsupported/unknown states,
+  no CI evidence, inconsistent head evidence, or incomplete/truncated contexts.
 
-- [`ci`](./ci.md) — Detailed CI/CD pipeline status
-- [`conflicts`](./conflicts.md) — Find PRs with merge conflicts
-- [`browse`](./browse.md) — Open PRs in browser
+The report includes individual checks, reasons, the full head SHA and the UTC
+observation time. GitHub Check Runs and legacy status contexts are both included.
+Completed SUCCESS, NEUTRAL and SKIPPED checks pass; pending checks never do.
+A null review decision with a CLEAN merge state means `not_required`, not an approval.
+Missing review policy never becomes an approval. Definite blockers take precedence
+when uncertainty is also present; both remain visible in the reasons.
+
+Requests share a connection pool, with at most four concurrent readiness requests,
+30-second timeouts and rate-limit cooldowns. Strict transports do not hide HTTP
+rate limits behind automatic retries. At most 100 check contexts are fetched in
+one snapshot; a larger/incomplete set produces UNKNOWN unless a definite blocker
+is already known. Explicit target lookups also use four workers and stop on errors.
+
+This is a conservative snapshot, not merge authorization. GitHub enforces current
+rules, permissions and merge-queue requirements at merge time.
+
+## JSON and compatibility
+
+`--json` still returns an array with the existing PR metadata, `approved`,
+`ci_status`, `has_conflicts`, `draft`, and optional `priority_score`. `approved`
+now reflects GitHub's actual APPROVED review decision. `draft` is null if evidence
+could not be obtained. Added fields are `state` (`ready`, `blocked`, `unknown`),
+`head_sha`, `observed_at`, `review_decision`, `merge_state`, `blockers`, and `checks`.
+Scripts should use `state == "ready"`; pending CI no longer counts as ready.
+Results sort READY, BLOCKED, UNKNOWN, then increasing age, repository and PR number.
+
+```bash
+prctrl ready --json | jq '.[] | select(.state == "ready")'
+```

@@ -31,3 +31,17 @@ Press `r` or `Ctrl+R` to request fresh data. Press `?` for help. `Esc` closes pa
 ## Accessibility
 
 Selection has a `>` marker. `DRAFT`, `OPEN` and `OVERDUE` text labels complement the colors; `OVERDUE` means more than seven days old. Set `NO_COLOR=1` to use terminal defaults and monochrome selection. Unicode titles remain supported.
+
+## Readiness evidence (2.3.0)
+
+The selected PR shows READY, BLOCKED or UNKNOWN, CI, review and merge state, blockers,
+a short head SHA and UTC time. Press `d` for full commit evidence and individual checks.
+Inside the panel, `j/k` or arrows scroll, PageUp/PageDown move ten lines, Home returns
+to the top, `r` fetches fresh evidence, and `d`/Esc closes. `q`/Ctrl+C still quits.
+
+Only the selected PR is fetched, after a 250 ms navigation debounce. Loads run in
+background tasks; obsolete generations cannot update the current observation.
+The commit-keyed cache holds at most 64 observations for 60 seconds. Expired evidence
+is hidden, and manual refresh or a successful active-view sync invalidates it.
+No new GitHub mutations are introduced. See [ready](./ready.md) for the shared rules,
+rate limits, conservative UNKNOWN states and snapshot limitations.
