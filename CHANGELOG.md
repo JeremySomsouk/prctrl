@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.3.0] - Unreleased
+
+### Added
+- Explainable read-only readiness shared by the CLI and TUI: CI checks, review/merge blockers, head SHA and observation time.
+- Selected-PR readiness summary and a scrollable `d` panel with refresh support and monochrome text labels.
+- JSON evidence fields including `state`, `head_sha`, `observed_at`, `review_decision`, `merge_state`, `blockers` and `checks`.
+
+### Fixed
+- Derive approval from GitHub review policy rather than requested reviewers; pending CI now blocks readiness.
+- Keep incomplete, missing, unsupported or mismatched evidence UNKNOWN instead of implying readiness.
+
+### Performance
+- Debounce selection loads, cancel obsolete work, reject old generations and bound the commit-keyed cache to 64 entries for 60 seconds.
+- Share HTTP connection pools and request budgets, cap readiness/target concurrency at four, use timeouts and honor rate-limit cooldowns without hidden retries.
+- Skip eager pending-review loads for explicitly targeted `ready` commands.
+
+### Compatibility
+- Retain the JSON array and legacy metadata fields. `approved` now means an actual APPROVED decision; `draft` may be null if evidence is unavailable. Scripts should use `state == "ready"`.
+
+
 ## [2.2.1] - 2026-10-04
 
 ### Performance

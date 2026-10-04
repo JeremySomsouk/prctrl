@@ -125,6 +125,8 @@ impl Ui {
         Self::footer(frame, app, areas[5], theme);
         if app.show_help {
             Self::help(frame, size, theme);
+        } else if app.show_readiness {
+            Self::readiness(frame, app, size, theme);
         } else if app.show_action_menu {
             Self::actions(frame, app, size, theme);
         }
@@ -262,7 +264,13 @@ impl Ui {
             Self::list(frame, app, columns[0], theme);
             Self::details(frame, app, columns[1], theme);
         } else {
-            let detail_height = if parts[1].height >= 14 { 7 } else { 0 };
+            let detail_height = if parts[1].height >= 18 {
+                11
+            } else if parts[1].height >= 14 {
+                9
+            } else {
+                0
+            };
             let rows = Layout::default()
                 .direction(Direction::Vertical)
                 .constraints([Constraint::Min(0), Constraint::Length(detail_height)])
@@ -363,7 +371,7 @@ impl Ui {
         let Some(pr) = app.selected_pr_item() else {
             return;
         };
-        let lines = vec![
+        let mut lines = vec![
             Line::styled(
                 pr.pr_title.as_str(),
                 theme.text(TEXT).add_modifier(Modifier::BOLD),
@@ -381,11 +389,98 @@ impl Ui {
             Line::styled(format!("Branch: {}", pr.branch), theme.text(MUTED)),
             Line::styled(pr.pr_url.as_str(), theme.text(ACCENT)),
         ];
+        let evidence = app.readiness.observation(&pr.repo, pr.pr_number);
+        let mut summary = vec![Line::styled(
+            format!(
+                "Readiness: {}  /  d details",
+                evidence
+                    .map(|r| r.state.label())
+                    .unwrap_or("UNKNOWN (loading)")
+            ),
+            theme.text(ACCENT),
+        )];
+        if let Some(r) = evidence {
+            summary.push(Line::from(format!(
+                "CI: {} / Review: {}",
+                r.ci_status, r.review_decision
+            )));
+            summary.push(Line::from(format!("Merge: {}", r.merge_state)));
+            for blocker in r.blockers.iter().take(2) {
+                summary.push(Line::from(format!("- {blocker}")));
+            }
+            if r.blockers.len() > 2 {
+                summary.push(Line::from("More blockers: press d"));
+            }
+            summary.push(Line::styled(
+                format!(
+                    "Head: {} / {} UTC",
+                    r.head_sha.as_deref().map(|s| &s[..8]).unwrap_or("unknown"),
+                    r.observed_at.format("%H:%M:%S")
+                ),
+                theme.text(MUTED),
+            ));
+        }
+        lines.splice(2..2, summary);
+        frame.render_widget(
+            Paragraph::new(lines).block(theme.block(" Selected PR  /  o open ")),
+            area,
+        );
+    }
+
+    fn readiness(frame: &mut Frame, app: &mut App, area: Rect, theme: Theme) {
+        let popup = centered(area, 100, area.height.saturating_sub(2));
+        let block = theme.block(if popup.width < 65 {
+            " Readiness / j/k / d close "
+        } else {
+            " Readiness / j/k scroll / r sync / d or Esc close "
+        });
+        let inner = block.inner(popup);
+        let mut text = Vec::new();
+        if let Some(pr) = app.selected_pr_item() {
+            text.push(format!("{} / #{} - {}", pr.repo, pr.pr_number, pr.pr_title));
+            if let Some(r) = app.readiness.observation(&pr.repo, pr.pr_number) {
+                text.push(format!(
+                    "{} / CI: {} / Review: {} / Merge: {}",
+                    r.state.label(),
+                    r.ci_status,
+                    r.review_decision,
+                    r.merge_state
+                ));
+                text.push(format!(
+                    "Head: {}",
+                    r.head_sha.as_deref().unwrap_or("unknown")
+                ));
+                text.push(format!("Observed: {}", r.observed_at.to_rfc3339()));
+                text.push("".into());
+                text.push("Blockers / uncertainty:".into());
+                if r.blockers.is_empty() {
+                    text.push("None reported".into());
+                }
+                text.extend(r.blockers.iter().map(|s| format!("- {s}")));
+                text.push("".into());
+                text.push("Checks on head commit:".into());
+                text.extend(r.checks.iter().map(|c| format!("{}: {}", c.name, c.status)));
+            } else {
+                text.push("UNKNOWN: waiting for fresh GitHub evidence".into());
+            }
+        }
+        text.push("".into());
+        text.push(
+            "Read-only snapshot. GitHub enforces rules and permissions at merge time.".into(),
+        );
+        let lines = wrap_lines(text, inner.width as usize);
+        let max_scroll = lines
+            .len()
+            .saturating_sub(inner.height as usize)
+            .min(u16::MAX as usize) as u16;
+        app.readiness_scroll = app.readiness_scroll.min(max_scroll);
+        frame.render_widget(Clear, popup);
+        frame.render_widget(block, popup);
         frame.render_widget(
             Paragraph::new(lines)
-                .wrap(Wrap { trim: false })
-                .block(theme.block(" Selected PR  /  o open ")),
-            area,
+                .style(theme.text(TEXT))
+                .scroll((app.readiness_scroll, 0)),
+            inner,
         );
     }
 
@@ -502,9 +597,9 @@ impl Ui {
         } else if app.filter_editing {
             "Type to filter  /  Enter apply  /  Esc cancel  /  Ctrl+C quit"
         } else if area.width < 65 {
-            "j/k move  / search  ? help  q quit"
+            "j/k move  / search  d details  ? help  q quit"
         } else {
-            "j/k move  Tab view  / search  Enter actions  o open  r sync  ? help  q quit"
+            "j/k move  Tab view  / search  Enter actions  d details  o open  r sync  ? help  q quit"
         };
         frame.render_widget(
             Paragraph::new(vec![
@@ -519,8 +614,8 @@ impl Ui {
     }
 
     fn help(frame: &mut Frame, area: Rect, theme: Theme) {
-        let popup = centered(area, 64, 19);
-        let text = "Move         Up/Down or j/k\nPage         PageUp/PageDown (10 PRs)\nFirst/last   Home/End (filtered results)\nViews        Tab/Shift+Tab or 1-5\nSearch       /, type, Enter to apply\nCancel edit  Esc restores previous filter\nClear filter Esc or Ctrl+F\nOpen PR      o, or Enter then choose\nSync now     r or Ctrl+R\nClose panel  Esc\nQuit         q or Ctrl+C\n\nDRAFT / OPEN / OVERDUE are text labels.\nSelection is marked with >.\nSet NO_COLOR=1 for a monochrome view.\nReview mutations remain available in the CLI.";
+        let popup = centered(area, 64, 20);
+        let text = "Move         Up/Down or j/k\nPage         PageUp/PageDown (10 PRs)\nFirst/last   Home/End (filtered results)\nViews        Tab/Shift+Tab or 1-5\nSearch       /, type, Enter to apply\nCancel edit  Esc restores previous filter\nClear filter Esc or Ctrl+F\nOpen PR      o, or Enter then choose\nReadiness    d (j/k scroll, r refresh)\nSync now     r or Ctrl+R\nClose panel  Esc\nQuit         q or Ctrl+C\n\nDRAFT / OPEN / OVERDUE are text labels.\nSelection is marked with >.\nSet NO_COLOR=1 for a monochrome view.\nReview mutations remain available in the CLI.";
         frame.render_widget(Clear, popup);
         frame.render_widget(
             Paragraph::new(text)
@@ -568,6 +663,29 @@ impl Ui {
             sections[2],
         );
     }
+}
+
+fn wrap_lines(text: Vec<String>, width: usize) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+    for text in text {
+        let mut line = String::new();
+        let mut used = 0;
+        for ch in text.chars() {
+            let size = if ch.is_ascii() {
+                1
+            } else {
+                Span::raw(ch.to_string()).width()
+            };
+            if used + size > width.max(1) && !line.is_empty() {
+                lines.push(Line::from(std::mem::take(&mut line)));
+                used = 0;
+            }
+            line.push(ch);
+            used += size;
+        }
+        lines.push(Line::from(line));
+    }
+    lines
 }
 
 fn centered(area: Rect, width: u16, height: u16) -> Rect {
@@ -674,5 +792,62 @@ mod tests {
         app.update_filtered_indices();
         assert!(render(&mut app, 80, 24).contains("No matching pull requests"));
         assert!(!app.show_action_menu);
+    }
+    #[tokio::test]
+    async fn readiness_panel_exposes_evidence_and_scrolls_without_color() {
+        let mut app = App::new(config(), 0).await.unwrap();
+        app.finish_load(Tab::PendingReviews, Ok(vec![review(7)]))
+            .await;
+        let mut evidence = crate::readiness::Readiness::unknown("Required reviews are outstanding");
+        evidence.state = crate::readiness::ReadinessState::Blocked;
+        evidence.head_sha = Some("a".repeat(40));
+        evidence.ci_status = "failure".into();
+        evidence.review_decision = "CHANGES_REQUESTED".into();
+        evidence.merge_state = "BLOCKED".into();
+        evidence.checks = (0..100)
+            .map(|n| crate::readiness::CheckResult {
+                name: format!("Test {n}"),
+                status: "FAILURE".into(),
+            })
+            .collect();
+        app.readiness.fixture(("demo".into(), 7), evidence);
+        app.show_readiness = true;
+        for (width, height) in [(30, 10), (40, 16), (80, 24), (120, 32), (170, 36)] {
+            app.readiness_scroll = 0;
+            let text = render(&mut app, width, height);
+            assert!(text.contains("BLOCKED"), "{width}x{height}");
+            if width >= 80 {
+                assert!(text.contains(&"a".repeat(40)));
+                assert!(text.contains("Required reviews are outstanding"));
+            }
+            if let Ok(dir) = std::env::var("PRCTRL_TEST_CAPTURE_DIR") {
+                let path = std::path::Path::new(&dir);
+                std::fs::create_dir_all(path).unwrap();
+                let capture = text
+                    .chars()
+                    .collect::<Vec<_>>()
+                    .chunks(width as usize)
+                    .map(|row| row.iter().collect::<String>())
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                std::fs::write(
+                    path.join(format!("readiness-{width}x{height}.txt")),
+                    capture,
+                )
+                .unwrap();
+            }
+            app.readiness_scroll = u16::MAX;
+            let text = render(&mut app, width, height);
+            assert!(text.contains("merge time."));
+        }
+        app.use_color = false;
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal.draw(|frame| Ui::draw(frame, &mut app)).unwrap();
+        assert!(terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .all(|cell| cell.fg == Color::Reset && cell.bg == Color::Reset));
     }
 }

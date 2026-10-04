@@ -1384,7 +1384,7 @@ pub enum Commands {
         #[arg(long)]
         json: bool,
     },
-    /// Show PRs that are ready to merge (approved, CI passing, no conflicts)
+    /// Explain PR readiness and blockers using GitHub CI, review and merge state
     Ready {
         /// Show PRs ready for specific repo
         #[arg(long)]

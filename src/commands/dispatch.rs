@@ -110,6 +110,17 @@ fn command_needs_prefetch(cli: &Cli) -> bool {
         })
         | Some(Commands::List { pr: Some(_), .. }) => false,
         Some(Commands::List { .. }) if cli.pr.is_some() => false,
+        Some(
+            Commands::Ready {
+                pr_number: Some(_), ..
+            }
+            | Commands::Ready { pr: Some(_), .. }
+            | Commands::Ready {
+                pr_numbers: Some(_),
+                ..
+            },
+        ) => false,
+        Some(Commands::Ready { .. }) if cli.pr.is_some() => false,
         _ => true,
     }
 }
@@ -13642,335 +13653,33 @@ pub async fn dispatch(ctx: CommandContext) -> anyhow::Result<()> {
             pr_number,
             pr,
             pr_numbers,
-            all,
+            all: _,
         } => {
-            use std::collections::HashMap;
-
-            // Priority: global --pr flag > local --pr > positional PR_NUMBER
-            let target_pr = ctx.cli.pr.or(pr).or(pr_number);
-
-            // Handle batch PR numbers - fetch all specified PRs in parallel
-            let prs_from_numbers: Vec<github::PendingReview> = if let Some(ref nums) = pr_numbers {
-                let mut results = Vec::new();
-                for part in nums.split(',') {
-                    if let Ok(num) = part.trim().parse::<u64>() {
-                        results.push(num);
-                    }
-                }
-                if results.is_empty() {
-                    println!("❌ No valid PR numbers provided.");
-                    return Ok(());
-                }
-                // Fetch all specified PRs in parallel
-                let fetch_futures = results.iter().map(|num| {
-                    github::fetch_pr_by_number(
-                        &ctx.cfg.github_token,
-                        &ctx.cfg.github_org,
-                        &ctx.cfg.github_repos,
-                        *num,
-                    )
-                });
-                join_all(fetch_futures)
-                    .await
-                    .into_iter()
-                    .filter_map(|r| r.ok())
-                    .flatten()
-                    .collect()
+            let target = ctx.cli.pr.or(pr).or(pr_number);
+            let mut reviews = if let Some(number) = target {
+                crate::commands::ready::fetch_targets(&ctx.cfg, &[number]).await?
+            } else if let Some(numbers) = pr_numbers {
+                let mut numbers = numbers
+                    .split(',')
+                    .map(|s| s.trim().parse::<u64>())
+                    .collect::<Result<Vec<_>, _>>()?;
+                numbers.sort_unstable();
+                numbers.dedup();
+                crate::commands::ready::fetch_targets(&ctx.cfg, &numbers).await?
             } else {
-                Vec::new()
+                ctx.reviews
             };
-
-            // Determine base PR list based on targeting mode
-            let base_reviews: Vec<github::PendingReview> = if let Some(num) = target_pr {
-                // Single PR via --pr or positional
-                github::fetch_pr_by_number(
-                    &ctx.cfg.github_token,
-                    &ctx.cfg.github_org,
-                    &ctx.cfg.github_repos,
-                    num,
-                )
-                .await?
-            } else if pr_numbers.is_some() {
-                // Batch mode via --pr-numbers
-                prs_from_numbers
-            } else if all {
-                // --all flag: use all pending ctx.reviews
-                ctx.reviews.clone()
-            } else {
-                // Interactive mode: use filtered ctx.reviews from main fetch
-                ctx.reviews.clone()
-            };
-
-            // Apply --repo, --author, and --since-days filters to ctx.reviews
-            let filtered_reviews: Vec<_> = {
-                let mut result = base_reviews;
-
-                // Apply --since-days filter (only show PRs created since N days ago)
-                if let Some(days) = since_days {
-                    let cutoff = chrono::Utc::now() - chrono::Duration::days(days as i64);
-                    result.retain(|r| r.created_at >= cutoff);
-                }
-
-                // Apply --repo filter (partial match, case-insensitive)
-                if let Some(ref repo_filter) = repo {
-                    let pattern = repo_filter.to_lowercase();
-                    result.retain(|r| r.repo.to_lowercase().contains(&pattern));
-                }
-
-                // Apply --author filter (partial match, case-insensitive)
-                if let Some(ref author_filter) = author {
-                    let pattern = author_filter.to_lowercase();
-                    result.retain(|r| r.pr_author.to_lowercase().contains(&pattern));
-                }
-
-                result
-            };
-
-            // Group ctx.reviews by repo for efficient API calls
-            let mut by_repo: HashMap<String, Vec<&github::PendingReview>> = HashMap::new();
-            for r in &filtered_reviews {
-                by_repo.entry(r.repo.clone()).or_default().push(r);
+            if let Some(days) = since_days {
+                let cutoff = chrono::Utc::now() - chrono::Duration::days(days as i64);
+                reviews.retain(|r| r.created_at >= cutoff);
             }
-
-            #[derive(serde::Serialize)]
-            struct ReadyPr {
-                repo: String,
-                pr_number: u64,
-                pr_title: String,
-                pr_author: String,
-                pr_url: String,
-                additions: u64,
-                deletions: u64,
-                age_days: i64,
-                approved: bool,
-                ci_status: String,
-                has_conflicts: bool,
-                draft: bool,
-                #[serde(skip_serializing_if = "Option::is_none")]
-                priority_score: Option<u8>,
+            if let Some(repo) = repo {
+                reviews.retain(|r| r.repo.to_lowercase().contains(&repo.to_lowercase()));
             }
-
-            // Build a flat list of (repo, pr_number) for parallel fetching
-            let fetch_tasks: Vec<(String, u64)> = by_repo
-                .iter()
-                .flat_map(|(repo_name, repo_reviews)| {
-                    repo_reviews
-                        .iter()
-                        .map(|r| (repo_name.clone(), r.pr_number))
-                })
-                .collect();
-
-            // Build review lookup for matching results to ctx.reviews
-            let mut review_lookup: HashMap<(String, u64), &github::PendingReview> = HashMap::new();
-            for r in &filtered_reviews {
-                review_lookup.insert((r.repo.clone(), r.pr_number), r);
+            if let Some(author) = author {
+                reviews.retain(|r| r.pr_author.to_lowercase().contains(&author.to_lowercase()));
             }
-
-            // Phase 1: Fetch all PR details in parallel
-            let github_username = ctx.cfg.github_username.clone();
-            let futures = fetch_tasks.iter().map(move |(repo_name, pr_number)| {
-                let client = octocrab::Octocrab::builder()
-                    .personal_token(ctx.cfg.github_token.clone())
-                    .build()
-                    .expect("failed to build GitHub client");
-                let org = ctx.cfg.github_org.clone();
-                let repo_name = repo_name.clone();
-                let pr_number = *pr_number;
-                let github_username = github_username.clone();
-
-                async move {
-                    let pr = client.pulls(&org, &repo_name).get(pr_number).await?;
-
-                    // Check approvals
-                    let approved = pr
-                        .requested_reviewers
-                        .as_deref()
-                        .map(|reviewers| reviewers.iter().any(|r| r.login == github_username))
-                        .unwrap_or(false);
-
-                    // Check CI status via combined status
-                    #[derive(serde::Deserialize)]
-                    struct CombinedStatus {
-                        state: String,
-                    }
-                    let ci_state: String = client
-                        .get(
-                            format!(
-                                "/repos/{}/{}/commits/{}/status",
-                                org, repo_name, pr.head.sha
-                            ),
-                            None::<&str>,
-                        )
-                        .await
-                        .map(|s: CombinedStatus| s.state)
-                        .unwrap_or_else(|_| "unknown".to_string());
-
-                    // Check for merge conflicts
-                    let has_conflicts = pr.mergeable == Some(false);
-                    let mergeable = pr.mergeable;
-
-                    Ok::<(bool, String, bool, Option<bool>), anyhow::Error>((
-                        approved,
-                        ci_state,
-                        has_conflicts,
-                        mergeable,
-                    ))
-                }
-            });
-
-            #[allow(clippy::type_complexity)]
-            let detail_results: Vec<
-                Result<(bool, String, bool, Option<bool>), anyhow::Error>,
-            > = join_all(futures).await;
-
-            let mut ready_prs = Vec::new();
-
-            for ((repo_name, pr_number), result) in fetch_tasks.iter().zip(detail_results) {
-                let review = match review_lookup.get(&(repo_name.clone(), *pr_number)) {
-                    Some(r) => r,
-                    None => continue,
-                };
-
-                let (approved, ci_status, has_conflicts, mergeable) = match result {
-                    Ok((a, c, h, m)) => (a, c, h, m),
-                    Err(_) => (false, "unknown".to_string(), false, None),
-                };
-
-                let _is_ready = !review.draft
-                    && (ci_status == "success" || ci_status == "pending")
-                    && !has_conflicts
-                    && mergeable != Some(false);
-
-                let age_days = (chrono::Utc::now() - review.created_at).num_days();
-
-                ready_prs.push(ReadyPr {
-                    repo: review.repo.clone(),
-                    pr_number: review.pr_number,
-                    pr_title: review.pr_title.clone(),
-                    pr_author: review.pr_author.clone(),
-                    pr_url: review.pr_url.clone(),
-                    additions: review.additions,
-                    deletions: review.deletions,
-                    age_days,
-                    approved,
-                    ci_status,
-                    has_conflicts,
-                    draft: review.draft,
-                    priority_score: if priority {
-                        Some(logger::calculate_priority_score(review))
-                    } else {
-                        None
-                    },
-                });
-            }
-
-            // Sort by readiness: ready first, then by age
-            ready_prs.sort_by(|a, b| {
-                let a_ready = !a.draft
-                    && (a.ci_status == "success" || a.ci_status == "pending")
-                    && !a.has_conflicts;
-                let b_ready = !b.draft
-                    && (b.ci_status == "success" || b.ci_status == "pending")
-                    && !b.has_conflicts;
-                match (a_ready, b_ready) {
-                    (true, false) => std::cmp::Ordering::Less,
-                    (false, true) => std::cmp::Ordering::Greater,
-                    _ => a.age_days.cmp(&b.age_days),
-                }
-            });
-
-            if json {
-                println!("{}", serde_json::to_string_pretty(&ready_prs)?);
-            } else {
-                let ready_count = ready_prs
-                    .iter()
-                    .filter(|p| {
-                        !p.draft
-                            && (p.ci_status == "success" || p.ci_status == "pending")
-                            && !p.has_conflicts
-                    })
-                    .count();
-
-                println!(
-                    "\n🚀 Merge Readiness — {} PRs total, {} ready to merge\n{}",
-                    ready_prs.len(),
-                    ready_count,
-                    "─".repeat(50)
-                );
-
-                for pr in &ready_prs {
-                    let is_ready = !pr.draft
-                        && (pr.ci_status == "success" || pr.ci_status == "pending")
-                        && !pr.has_conflicts;
-
-                    let status_icon = if is_ready {
-                        "✅".green()
-                    } else if pr.draft {
-                        "📝".yellow()
-                    } else if pr.has_conflicts {
-                        "⚠️  conflicts".red()
-                    } else {
-                        "⏳".normal()
-                    };
-
-                    let ci_icon: ColoredString = match pr.ci_status.as_str() {
-                        "success" => "✅ CI".green(),
-                        "failure" | "error" => "❌ CI".red(),
-                        "pending" => "⏳ CI".yellow(),
-                        _ => format!("? CI ({})", pr.ci_status).dimmed(),
-                    };
-
-                    let _total = pr.additions + pr.deletions;
-                    let age_str: ColoredString = if pr.age_days == 0 {
-                        "today".green()
-                    } else if pr.age_days == 1 {
-                        "1 day".normal()
-                    } else if pr.age_days <= 7 {
-                        format!("{} days", pr.age_days).yellow()
-                    } else {
-                        format!("{} days", pr.age_days).red()
-                    };
-
-                    let priority_display = if priority {
-                        if let Some(score) = pr.priority_score {
-                            format!("  ⭐ {}/5", logger::priority_stars(score))
-                        } else {
-                            String::new()
-                        }
-                    } else {
-                        String::new()
-                    };
-
-                    println!(
-                        "  {}  #{}  {}{}",
-                        status_icon,
-                        pr.pr_number,
-                        pr.pr_title.bold(),
-                        priority_display
-                    );
-                    println!(
-                        "      👤 {}  •  📦 +{}/-{}  •  ⏱️ {}  •  {}",
-                        pr.pr_author.cyan(),
-                        pr.additions,
-                        pr.deletions,
-                        age_str,
-                        ci_icon
-                    );
-                    println!(
-                        "      📁 {}  🔗 {}",
-                        pr.repo.dimmed(),
-                        pr.pr_url.blue().underline()
-                    );
-                    println!();
-                }
-
-                println!("{}", "─".repeat(50));
-                println!("  💡 Ready = not draft + CI passing + no conflicts");
-                if priority {
-                    println!("  💡 Priority based on age and size");
-                }
-                println!("  💡 Use `--json` for scripting\n");
-            }
+            crate::commands::ready::report(&ctx.cfg, reviews, json, priority).await?;
         }
 
         Commands::Blocked {
@@ -14941,6 +14650,33 @@ mod tests {
                 }
                 assert!(command_needs_prefetch(
                     &Cli::try_parse_from(["prctrl", "list"]).unwrap()
+                ));
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+}
+
+#[cfg(test)]
+mod readiness_prefetch_tests {
+    use super::*;
+    use clap::Parser;
+    #[test]
+    fn explicit_ready_targets_skip_eager_loads() {
+        std::thread::Builder::new()
+            .stack_size(8 * 1024 * 1024)
+            .spawn(|| {
+                for args in [
+                    vec!["prctrl", "ready", "7"],
+                    vec!["prctrl", "ready", "--pr", "7"],
+                    vec!["prctrl", "ready", "--pr-numbers", "7,8"],
+                    vec!["prctrl", "--pr", "7", "ready"],
+                ] {
+                    assert!(!command_needs_prefetch(&Cli::try_parse_from(args).unwrap()));
+                }
+                assert!(command_needs_prefetch(
+                    &Cli::try_parse_from(["prctrl", "ready", "--all"]).unwrap()
                 ));
             })
             .unwrap()

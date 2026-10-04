@@ -1,6 +1,6 @@
 [package]
 name = "prctrl"
-version = "2.2.1"
+version = "2.3.0"
 edition = "2021"
 rust-version = "1.99"
 description = "Terminal-native GitHub PR management. Stay on top of code reviews without leaving your terminal."
