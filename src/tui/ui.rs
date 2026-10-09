@@ -123,13 +123,70 @@ impl Ui {
             Self::message(frame, app, areas[4], theme);
         }
         Self::footer(frame, app, areas[5], theme);
-        if app.show_help {
+        if app.settings.is_some() {
+            Self::settings(frame, app, size, theme);
+        } else if app.show_help {
             Self::help(frame, size, theme);
         } else if app.show_readiness {
             Self::readiness(frame, app, size, theme);
         } else if app.show_action_menu {
             Self::actions(frame, app, size, theme);
         }
+    }
+
+    fn settings(frame: &mut Frame, app: &App, area: Rect, theme: Theme) {
+        let settings = app.settings.as_ref().unwrap();
+        let popup = centered(area, 100, 26);
+        let block = theme.block(" Configuration / Esc close (discard unsaved changes) ");
+        let inner = block.inner(popup);
+        frame.render_widget(Clear, popup);
+        frame.render_widget(block, popup);
+        let sections = Layout::vertical([
+            Constraint::Length(if inner.height < 12 { 1 } else { 4 }),
+            Constraint::Min(0),
+            Constraint::Length(if inner.height < 12 { 1 } else { 3 }),
+        ])
+        .split(inner);
+        frame.render_widget(Paragraph::new(format!("{}\nFile values; environment variables may override them.\nSave rewrites TOML formatting and comments.\nEnter edit / Ctrl+S save / Ctrl+C quit", crate::config::get_config_path().display())).style(theme.text(MUTED)).wrap(Wrap { trim: false }), sections[0]);
+        let items: Vec<ListItem> = crate::tui::settings::FIELDS
+            .iter()
+            .enumerate()
+            .map(|(i, (key, label))| {
+                let value = &settings.values[i];
+                let shown = if matches!(*key, "token" | "anthropic_api_key") && !value.is_empty() {
+                    "********".to_string()
+                } else {
+                    value.clone()
+                };
+                let editing = settings.editing && settings.selected == i;
+                let available = sections[1].width.saturating_sub(2 + u16::from(editing)) as usize;
+                let shown = field_tail(&shown, available);
+                ListItem::new(vec![
+                    Line::from(*label),
+                    Line::from(format!("{shown}{}", if editing { "_" } else { "" })),
+                ])
+            })
+            .collect();
+        frame.render_stateful_widget(
+            List::new(items)
+                .highlight_symbol("> ")
+                .highlight_style(theme.selected()),
+            sections[1],
+            &mut ListState::default().with_selected(Some(settings.selected)),
+        );
+        let message = if settings.editing {
+            "Type value / Backspace erase / Delete clear / Enter finish / Esc cancel field"
+        } else if settings.message.is_empty() {
+            "j/k or Tab choose field / Enter edit / Ctrl+S save"
+        } else {
+            &settings.message
+        };
+        frame.render_widget(
+            Paragraph::new(message)
+                .style(theme.text(WARNING))
+                .wrap(Wrap { trim: false }),
+            sections[2],
+        );
     }
 
     fn brand(frame: &mut Frame, app: &App, area: Rect, theme: Theme) {
@@ -203,7 +260,7 @@ impl Ui {
         if parts[1].height > 0 {
             frame.render_widget(
                 Paragraph::new(
-                    "Tab   switch view\n/     find a PR\nr     sync GitHub\n?     all shortcuts",
+                    "Tab   switch view\nc     configuration\n/     find a PR\nr     sync / ? help",
                 )
                 .style(theme.text(MUTED))
                 .block(theme.block(" Quick keys ")),
@@ -593,13 +650,13 @@ impl Ui {
             format!("{} / {}", app.filtered_position + 1, count)
         };
         let hints = if app.active_tab == Tab::Statistics {
-            "Tab view  /  r sync  /  ? help  /  q quit"
+            "Tab view  /  r sync  /  c config  /  ? help  /  q quit"
         } else if app.filter_editing {
             "Type to filter  /  Enter apply  /  Esc cancel  /  Ctrl+C quit"
         } else if area.width < 65 {
-            "j/k move  / search  d details  ? help  q quit"
+            "c config  j/k move  / search  ? help  q quit"
         } else {
-            "j/k move  Tab view  / search  Enter actions  d details  o open  r sync  ? help  q quit"
+            "c config  j/k move  Tab view  / search  Enter actions  d details  o open  r sync  ? help  q quit"
         };
         frame.render_widget(
             Paragraph::new(vec![
@@ -615,7 +672,7 @@ impl Ui {
 
     fn help(frame: &mut Frame, area: Rect, theme: Theme) {
         let popup = centered(area, 64, 20);
-        let text = "Move         Up/Down or j/k\nPage         PageUp/PageDown (10 PRs)\nFirst/last   Home/End (filtered results)\nViews        Tab/Shift+Tab or 1-5\nSearch       /, type, Enter to apply\nCancel edit  Esc restores previous filter\nClear filter Esc or Ctrl+F\nOpen PR      o, or Enter then choose\nReadiness    d (j/k scroll, r refresh)\nSync now     r or Ctrl+R\nClose panel  Esc\nQuit         q or Ctrl+C\n\nDRAFT / OPEN / OVERDUE are text labels.\nSelection is marked with >.\nSet NO_COLOR=1 for a monochrome view.\nReview mutations remain available in the CLI.";
+        let text = "Move         Up/Down or j/k\nPage         PageUp/PageDown (10 PRs)\nFirst/last   Home/End (filtered results)\nViews        Tab/Shift+Tab or 1-5\nSearch       /, type, Enter to apply\nCancel edit  Esc restores previous filter\nClear filter Esc or Ctrl+F\nOpen PR      o, or Enter then choose\nReadiness    d (j/k scroll, r refresh)\nSync now     r or Ctrl+R\nConfig       c (Ctrl+S save)\nClose panel  Esc\nQuit         q or Ctrl+C\n\nDRAFT / OPEN / OVERDUE are text labels.\nSelection is marked with >.\nSet NO_COLOR=1 for a monochrome view.\nReview mutations remain available in the CLI.";
         frame.render_widget(Clear, popup);
         frame.render_widget(
             Paragraph::new(text)
@@ -663,6 +720,28 @@ impl Ui {
             sections[2],
         );
     }
+}
+
+fn field_tail(value: &str, width: usize) -> String {
+    if Span::raw(value).width() <= width {
+        return value.to_string();
+    }
+    if width == 0 {
+        return String::new();
+    }
+    let mut used = 0;
+    let tail: String = value
+        .chars()
+        .rev()
+        .take_while(|ch| {
+            used += Span::raw(ch.to_string()).width();
+            used <= width.saturating_sub(1)
+        })
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
+    format!("…{tail}")
 }
 
 fn wrap_lines(text: Vec<String>, width: usize) -> Vec<Line<'static>> {
@@ -728,6 +807,54 @@ mod tests {
             .iter()
             .map(|cell| cell.symbol())
             .collect()
+    }
+
+    #[tokio::test]
+    async fn long_configuration_fields_keep_new_input_and_cursor_visible() {
+        let mut app = App::new(config(), 0).await.unwrap();
+        let path = std::env::temp_dir().join("prctrl-nonexistent-long-settings.toml");
+        let mut settings = crate::tui::settings::Settings::load(&path).unwrap();
+        settings.selected = 3;
+        settings.values[3] = "repository-name,".repeat(20);
+        settings.begin_edit();
+        settings.values[3].push_str("東京-latest");
+        app.settings = Some(settings);
+        for (width, height) in [(30, 10), (40, 16), (80, 24), (120, 32)] {
+            let text = render(&mut app, width, height);
+            assert!(text.contains("-latest_"), "{width}x{height}");
+        }
+        assert_eq!(field_tail("東京abcd", 5), "…abcd");
+        assert_eq!(field_tail("abc", 0), "");
+    }
+
+    #[tokio::test]
+    async fn configuration_shortcut_is_visible_at_supported_widths() {
+        let mut app = App::new(config(), 0).await.unwrap();
+        for (width, height) in [(30, 10), (65, 16), (80, 24), (120, 32)] {
+            assert!(
+                render(&mut app, width, height).contains("c config"),
+                "{width}x{height}"
+            );
+        }
+        assert!(render(&mut app, 120, 32).contains("c     configuration"));
+    }
+
+    #[tokio::test]
+    async fn settings_mask_credentials_and_render_in_small_terminals() {
+        let mut app = App::new(config(), 0).await.unwrap();
+        let path = std::env::temp_dir().join("prctrl-nonexistent-settings-ui.toml");
+        let mut settings = crate::tui::settings::Settings::load(&path).unwrap();
+        settings.values[0] = "secret-token-value".into();
+        settings.values[6] = "secret-api-value".into();
+        app.settings = Some(settings);
+        for (width, height) in [(30, 10), (80, 24), (120, 32)] {
+            let text = render(&mut app, width, height);
+            assert!(!text.contains("secret-token-value"));
+            assert!(!text.contains("secret-api-value"));
+            if width >= 80 {
+                assert!(text.contains("********"));
+            }
+        }
     }
 
     #[tokio::test]

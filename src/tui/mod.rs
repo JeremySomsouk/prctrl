@@ -17,3 +17,5 @@ pub use run::run_tui;
 pub use ui::Ui;
 
 pub mod readiness;
+
+pub(crate) mod settings;

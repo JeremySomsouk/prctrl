@@ -45,3 +45,14 @@ The commit-keyed cache holds at most 64 observations for 60 seconds. Expired evi
 is hidden, and manual refresh or a successful active-view sync invalidates it.
 No new GitHub mutations are introduced. See [ready](./ready.md) for the shared rules,
 rate limits, conservative UNKNOWN states and snapshot limitations.
+
+## Edit configuration
+
+Press `c` to open the configuration panel. Select a field with Up/Down or Tab,
+press Enter to edit, then Enter to finish or Esc to cancel that field. Ctrl+S
+saves the file; Esc closes the panel and discards unsaved changes. Ctrl+C quits.
+Tokens and API keys are masked. Lists use commas; Delete clears a field.
+Maximum PR age accepts a non-negative whole number; blank restores the default.
+Repositories and crew members apply immediately after saving and refresh the PR views.
+Restart the TUI to apply other saved changes. Environment variables retain their existing
+precedence. Saving preserves unknown settings but rewrites TOML formatting and removes comments.

@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.4.0] - Unreleased
+
+### Added
+- TUI configuration panel opened with `c`, with masked credentials, field editing, validation and explicit saving with Ctrl+S. Repository and crew changes refresh immediately; other settings apply after restarting.
+
 ## [2.3.0] - Unreleased
 
 ### Added

@@ -41,6 +41,7 @@ pub struct ReviewSummary {
 
 /// Application state for the TUI
 pub struct App {
+    pub(crate) settings: Option<crate::tui::settings::Settings>,
     /// Configuration loaded from file or environment
     pub config: Config,
     /// List of pending reviews to display
@@ -160,6 +161,7 @@ impl App {
             config.github_org.clone(),
         );
         Ok(Self {
+            settings: None,
             readiness,
             show_readiness: false,
             readiness_scroll: 0,
@@ -379,6 +381,30 @@ impl App {
         }
     }
 
+    pub(crate) async fn apply_live_lists(
+        &mut self,
+        repos: Vec<String>,
+        crew: Vec<String>,
+    ) -> Result<()> {
+        if self.config.github_repos == repos && self.config.crew_members == crew {
+            return Ok(());
+        }
+        self.config.github_repos = repos;
+        self.config.crew_members = crew;
+        self.loads = JoinSet::new();
+        self.pending.clear();
+        self.snapshots.clear();
+        self.readiness.invalidate();
+        self.show_readiness = false;
+        self.show_action_menu = false;
+        self.set_reviews(Arc::from([]));
+        self.last_refresh = None;
+        self.last_attempt = None;
+        self.viewport_offset = 0;
+        self.refresh().await?;
+        self.preload_all_tabs().await
+    }
+
     /// Each tab becomes usable as soon as its own load completes.
     pub async fn preload_all_tabs(&mut self) -> Result<()> {
         for tab in [Tab::PendingReviews, Tab::MyPullRequests, Tab::Crew] {
@@ -557,6 +583,29 @@ pub(crate) mod tests {
     async fn complete(app: &mut App) {
         let (tab, result) = app.loads.join_next().await.unwrap().unwrap();
         app.finish_load(tab, result).await;
+    }
+
+    #[tokio::test]
+    async fn live_lists_cancel_old_loads_and_reset_every_view() {
+        let mut app = App::new(config(), 0).await.unwrap();
+        app.finish_load(Tab::PendingReviews, Ok(vec![review(1)]))
+            .await;
+        app.start_load(Tab::MyPullRequests, std::future::pending());
+        let repos = vec!["new-repository".to_string()];
+        let crew = vec!["new-member".to_string()];
+        app.apply_live_lists(repos.clone(), crew.clone())
+            .await
+            .unwrap();
+        assert_eq!(app.config.github_repos, repos);
+        assert_eq!(app.config.crew_members, crew);
+        assert!(app.reviews.is_empty());
+        assert!(app.snapshots.is_empty());
+        assert!(app.last_refresh.is_none());
+        assert!(app.loading);
+        assert_eq!(app.loads.len(), 3);
+        assert_eq!(app.pending.len(), 3);
+        app.apply_live_lists(repos, crew).await.unwrap();
+        assert_eq!(app.loads.len(), 3);
     }
 
     #[tokio::test]

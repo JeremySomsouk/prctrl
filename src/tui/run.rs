@@ -123,6 +123,45 @@ async fn handle_key_event(app: &mut App, key: crossterm::event::KeyEvent) -> Res
     if ctrl && key.code == KeyCode::Char('c') {
         return Ok(false);
     }
+    if let Some(settings) = app.settings.as_mut() {
+        if settings.editing {
+            match key.code {
+                KeyCode::Enter => settings.editing = false,
+                KeyCode::Esc => settings.cancel_edit(),
+                KeyCode::Backspace => {
+                    settings.values[settings.selected].pop();
+                }
+                KeyCode::Delete => settings.values[settings.selected].clear(),
+                KeyCode::Char(c) if !ctrl && !key.modifiers.contains(KeyModifiers::ALT) => {
+                    settings.values[settings.selected].push(c)
+                }
+                _ => {}
+            }
+        } else {
+            match key.code {
+                KeyCode::Esc => app.settings = None,
+                KeyCode::Down | KeyCode::Char('j') | KeyCode::Tab => {
+                    settings.selected = (settings.selected + 1) % crate::tui::settings::FIELDS.len()
+                }
+                KeyCode::Up | KeyCode::Char('k') | KeyCode::BackTab => {
+                    settings.selected = (settings.selected + crate::tui::settings::FIELDS.len() - 1)
+                        % crate::tui::settings::FIELDS.len()
+                }
+                KeyCode::Enter => settings.begin_edit(),
+                KeyCode::Char('s') if ctrl => {
+                    match settings.save(&crate::config::get_config_path()) {
+                        Ok(()) => {
+                            let (repos, crew) = settings.live_lists();
+                            app.apply_live_lists(repos, crew).await?;
+                        }
+                        Err(error) => settings.message = format!("{error:#}"),
+                    }
+                }
+                _ => {}
+            }
+        }
+        return Ok(true);
+    }
     if ctrl && key.code == KeyCode::Char('f') {
         app.filter.clear();
         app.filter_editing = false;
@@ -230,6 +269,12 @@ async fn handle_key_event(app: &mut App, key: crossterm::event::KeyEvent) -> Res
         }
         KeyCode::Char('r') | KeyCode::Char('R') => app.force_refresh().await?,
         KeyCode::Char('?') => app.show_help = true,
+        KeyCode::Char('c') => {
+            match crate::tui::settings::Settings::load(&crate::config::get_config_path()) {
+                Ok(settings) => app.settings = Some(settings),
+                Err(error) => app.error = Some(format!("Cannot open settings: {error:#}")),
+            }
+        }
         KeyCode::Char('d')
             if app.selected_pr_item().is_some()
                 && app.active_tab != crate::tui::app::Tab::Statistics =>
@@ -287,6 +332,25 @@ mod tests {
         handle_key_event(app, KeyEvent::new(code, KeyModifiers::NONE))
             .await
             .unwrap()
+    }
+
+    #[tokio::test]
+    async fn settings_capture_shortcuts_and_cancel_field_edits() {
+        let mut app = App::new(config(), 0).await.unwrap();
+        let path = std::env::temp_dir().join("prctrl-nonexistent-settings-fixture.toml");
+        app.settings = Some(crate::tui::settings::Settings::load(&path).unwrap());
+        key(&mut app, KeyCode::Enter).await;
+        for c in "qcrj?".chars() {
+            assert!(key(&mut app, KeyCode::Char(c)).await);
+        }
+        assert_eq!(app.settings.as_ref().unwrap().values[0], "qcrj?");
+        assert!(app.loads.is_empty());
+        key(&mut app, KeyCode::Esc).await;
+        assert_eq!(app.settings.as_ref().unwrap().values[0], "");
+        key(&mut app, KeyCode::Tab).await;
+        assert_eq!(app.settings.as_ref().unwrap().selected, 1);
+        key(&mut app, KeyCode::Esc).await;
+        assert!(app.settings.is_none());
     }
 
     #[tokio::test]

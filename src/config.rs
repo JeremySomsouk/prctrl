@@ -15,7 +15,7 @@ pub struct Config {
     pub max_pr_age_days: Option<u32>,
 }
 
-fn get_config_path() -> PathBuf {
+pub(crate) fn get_config_path() -> PathBuf {
     dirs::config_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join("prctrl")
